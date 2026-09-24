@@ -1,0 +1,14 @@
+.{
+    .name = .stash,
+    .fingerprint = 0x9263388140d2eb9d,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "testing",
+        "README.md",
+        "LICENSE",
+    },
+}
