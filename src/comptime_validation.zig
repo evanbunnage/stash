@@ -42,7 +42,8 @@ fn assertStorableType(comptime T: type, comptime type_path: []const u8) void {
             if (array_info.sentinel_ptr != null) {
                 @compileError("stash: sentinel arrays are not supported\n" ++
                     "  '" ++ type_path ++ "' has type '" ++ @typeName(T) ++ "'\n" ++
-                    "  fix: use an ordinary array and store any terminator explicitly");
+                    "  fix: use an ordinary array and store any terminator explicitly\n" ++
+                    "  example: https://github.com/evanbunnage/stash/blob/main/examples/17_stash_null_terminated_strings.zig");
             }
             assertStorableType(array_info.child, type_path);
             return;
@@ -51,7 +52,8 @@ fn assertStorableType(comptime T: type, comptime type_path: []const u8) void {
             switch (struct_info.layout) {
                 .auto => @compileError("stash: stored structs must be extern or packed\n" ++
                     "  '" ++ type_path ++ "' has an auto layout\n" ++
-                    "  fix: use an extern or packed struct so its on-disk layout is defined"),
+                    "  fix: use an extern or packed struct so its on-disk layout is defined\n" ++
+                    "  example: https://github.com/evanbunnage/stash/blob/main/examples/03_stash_a_struct.zig"),
                 .@"extern" => {
                     assertStructHasNoImplicitPadding(T);
                     for (struct_info.fields) |field| {
@@ -68,23 +70,30 @@ fn assertStorableType(comptime T: type, comptime type_path: []const u8) void {
         },
         .vector => @compileError("stash: vectors are not supported\n" ++
             "  '" ++ type_path ++ "' is a vector; vectors can have padding and bit packing that differ from arrays\n" ++
-            "  fix: store an array of storable elements; create a vector from the array when you need vector operations"),
+            "  fix: store an array of storable elements and convert it to a vector for vector operations\n" ++
+            "  example: https://github.com/evanbunnage/stash/blob/main/examples/15_stash_vectors.zig"),
         .@"union" => @compileError("stash: unions are not supported\n" ++
             "  '" ++ type_path ++ "' is a union\n" ++
-            "  fix: store a byte array with an explicit enum tag and validate both"),
+            "  fix: store an explicit enum tag and initialized fields for the alternatives\n" ++
+            "  example: https://github.com/evanbunnage/stash/blob/main/examples/12_stash_tagged_unions.zig"),
         .pointer => @compileError("stash: stored values must not contain pointers\n" ++
             "  '" ++ type_path ++ "' contains a pointer; saving its memory address will not let you find the data after loading\n" ++
-            "  fix: store an ID or a byte offset within the stored data instead"),
+            "  fix: store a record index, ID, or byte offset instead\n" ++
+            "  example: https://github.com/evanbunnage/stash/blob/main/examples/13_stash_references.zig\n" ++
+            "  for slice fields, use Layout or Columns: https://github.com/evanbunnage/stash/blob/main/examples/06_stash_structs_as_columns.zig"),
         .optional => @compileError("stash: optional values are not supported\n" ++
             "  '" ++ type_path ++ "' is optional\n" ++
-            "  fix: use a storable type with a way to indicate 'no value'"),
+            "  fix: store a presence flag alongside an initialized value\n" ++
+            "  example: https://github.com/evanbunnage/stash/blob/main/examples/11_stash_optional_values.zig"),
         .error_set => @compileError("stash: error sets are not supported\n" ++
             "  '" ++ type_path ++ "' is an error set; the integers used to represent errors can change between builds\n" ++
-            "  fix: map errors to an explicitly numbered enum with a fixed-width integer tag"),
+            "  fix: map errors to an explicitly numbered enum with a fixed-width integer tag\n" ++
+            "  example: https://github.com/evanbunnage/stash/blob/main/examples/14_stash_error_results.zig"),
         .error_union => @compileError("stash: error unions are not supported\n" ++
             "  '" ++ type_path ++ "' is an error union; the integers used to represent errors and the memory layout are not stable storage formats\n" ++
             "  fix: store an explicitly numbered status enum and a storable payload in an extern struct\n" ++
-            "  fix: initialize the payload even when the status indicates an error"),
+            "  fix: initialize the payload even when the status indicates an error\n" ++
+            "  example: https://github.com/evanbunnage/stash/blob/main/examples/14_stash_error_results.zig"),
         else => @compileError("stash: type is not storable\n" ++
             "  '" ++ type_path ++ "' has type '" ++ @typeName(T) ++ "'\n" ++
             "  fix: use a scalar value, an array, or an extern or packed struct with storable fields"),
@@ -112,7 +121,8 @@ pub fn assertStorablePackedField(comptime T: type, comptime type_path: []const u
         },
         .@"union" => @compileError("stash: unions are not supported\n" ++
             "  '" ++ type_path ++ "' is a union\n" ++
-            "  fix: store a byte array with an explicit enum tag and validate both"),
+            "  fix: store an explicit enum tag and initialized fields for the alternatives\n" ++
+            "  example: https://github.com/evanbunnage/stash/blob/main/examples/12_stash_tagged_unions.zig"),
         else => @compileError("stash: packed fields must be integers, bools, enums, or packed structs\n" ++
             "  '" ++ type_path ++ "' has type '" ++ @typeName(T) ++ "'"),
     }
@@ -123,7 +133,8 @@ fn assertFixedWidthInteger(comptime T: type, comptime type_path: []const u8) voi
     if (T == usize or T == isize) {
         @compileError("stash: target-sized integers are not supported\n" ++
             "  '" ++ type_path ++ "' is backed by '" ++ @typeName(T) ++ "'\n" ++
-            "  fix: use an explicitly sized integer such as u32, u64, or i32");
+            "  fix: use an explicitly sized integer such as u32, u64, or i32\n" ++
+            "  example: https://github.com/evanbunnage/stash/blob/main/examples/16_stash_structs_with_padding.zig");
     }
 }
 
@@ -150,7 +161,8 @@ fn assertStructHasNoImplicitPadding(comptime T: type) void {
             @compileError(std.fmt.comptimePrint(
                 "stash: implicit field padding is not supported\n" ++
                     "  '{s}' has {d} bytes of implicit padding before field '{s}'\n" ++
-                    "  fix: insert an explicit [{d}]u8 reserved field before '{s}'",
+                    "  fix: insert an explicit [{d}]u8 reserved field before '{s}'\n" ++
+                    "  example: https://github.com/evanbunnage/stash/blob/main/examples/16_stash_structs_with_padding.zig",
                 .{ @typeName(T), offset - end, field.name, offset - end, field.name },
             ));
         }
@@ -160,7 +172,8 @@ fn assertStructHasNoImplicitPadding(comptime T: type) void {
         @compileError(std.fmt.comptimePrint(
             "stash: implicit tail padding is not supported\n" ++
                 "  '{s}' has {d} bytes of implicit tail padding\n" ++
-                "  fix: append an explicit [{d}]u8 reserved field",
+                "  fix: append an explicit [{d}]u8 reserved field\n" ++
+                "  example: https://github.com/evanbunnage/stash/blob/main/examples/16_stash_structs_with_padding.zig",
             .{ @typeName(T), @sizeOf(T) - end, @sizeOf(T) - end },
         ));
     }
@@ -190,7 +203,8 @@ pub fn assertSliceHasSupportedPointerAttributes(comptime T: type) void {
     const pointer = @typeInfo(T).pointer;
     if (pointer.sentinel_ptr != null) @compileError("stash: sentinel slices are not supported\n" ++
         "  received '" ++ @typeName(T) ++ "'\n" ++
-        "  fix: use []const T and store any terminator explicitly");
+        "  fix: use []const T and store any terminator explicitly\n" ++
+        "  example: https://github.com/evanbunnage/stash/blob/main/examples/17_stash_null_terminated_strings.zig");
     if (pointer.is_volatile) @compileError("stash: volatile slices are not supported\n" ++
         "  received '" ++ @typeName(T) ++ "'\n" ++
         "  fix: use []const T");
