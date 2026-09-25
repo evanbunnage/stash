@@ -14,6 +14,7 @@
 //! and returns a value rather than a pointer into the buffer
 
 const std = @import("std");
+
 const blocks = @import("../blocks.zig");
 const bytes = @import("../bytes.zig");
 const comptime_validation = @import("../comptime_validation.zig");
@@ -33,14 +34,36 @@ pub fn PackedSlice(comptime T: type) type {
             data: []const u8,
             count: usize,
 
-            pub fn len(self: View) usize {
+            pub fn len(self: @This()) usize {
                 return self.count;
             }
 
-            /// Return the element by value, not by reference
-            pub fn get(self: View, index: usize) blocks.IndexError!T {
+            /// Return the element by value. This is necessary for packed data because it can
+            /// span byte boundaries, so getting values by reference isn't practical
+            pub fn get(self: @This(), index: usize) blocks.IndexError!T {
                 if (index >= self.count) return error.IndexOutOfBounds;
                 return readElement(T, self.data, index);
+            }
+        };
+
+        pub const MutableView = struct {
+            data: []u8,
+            count: usize,
+
+            pub fn len(self: @This()) usize {
+                return self.count;
+            }
+
+            /// Return the element by value
+            pub fn get(self: @This(), index: usize) blocks.IndexError!T {
+                if (index >= self.count) return error.IndexOutOfBounds;
+                return readElement(T, self.data, index);
+            }
+
+            /// Replace an element's bits in place
+            pub fn set(self: @This(), index: usize, value: T) blocks.IndexError!void {
+                if (index >= self.count) return error.IndexOutOfBounds;
+                writeElement(T, self.data, index, value);
             }
         };
 
@@ -73,6 +96,13 @@ pub fn PackedSlice(comptime T: type) type {
                 for (0..result.count) |index| try validateElement(T, result.data, index);
             }
             return result;
+        }
+
+        /// Validate the buffer and return a view that can replace packed elements with set()
+        pub fn viewMutable(buffer: []u8) blocks.ViewError!MutableView {
+            const checked = try view(buffer);
+            // The checked data still points into the caller's mutable buffer
+            return .{ .data = @constCast(checked.data), .count = checked.count };
         }
 
         /// Check the buffer's size and unused bits without validating enum tags
@@ -227,6 +257,7 @@ test "PackedSlice view() rejects an undeclared enum tag" {
     // Overwrite the second element (bits 3–5) with the invalid tag 5
     std.mem.writePackedInt(u3, buffer[@sizeOf(u32)..written], 3, 5, .little);
     try std.testing.expectError(error.InvalidValue, Block.view(buffer[0..written]));
+    try std.testing.expectError(error.InvalidValue, Block.viewMutable(buffer[0..written]));
 }
 
 test "PackedSlice views reject trailing bytes and nonzero unused bits" {
@@ -234,10 +265,12 @@ test "PackedSlice views reject trailing bytes and nonzero unused bits" {
     var buffer = [_]u8{ 1, 0, 0, 0, 5, 0 };
     try std.testing.expectEqual(@as(u3, 5), try (try Block.view(buffer[0..5])).get(0));
     try std.testing.expectError(error.InvalidFormat, Block.view(&buffer));
+    try std.testing.expectError(error.InvalidFormat, Block.viewMutable(&buffer));
     try std.testing.expectError(error.InvalidFormat, Block.viewAssumeValid(&buffer));
     for (3..8) |bit| {
         buffer[4] = 5 | (@as(u8, 1) << @intCast(bit));
         try std.testing.expectError(error.InvalidFormat, Block.view(buffer[0..5]));
+        try std.testing.expectError(error.InvalidFormat, Block.viewMutable(buffer[0..5]));
         try std.testing.expectError(error.InvalidFormat, Block.viewAssumeValid(buffer[0..5]));
     }
 }
@@ -248,6 +281,7 @@ test "PackedSlice rejects a buffer too small for the maximum element count witho
     bytes.writeValue(u32, &buffer, std.math.maxInt(u32));
 
     try std.testing.expectError(error.BufferTooSmall, Block.view(&buffer));
+    try std.testing.expectError(error.BufferTooSmall, Block.viewMutable(&buffer));
 }
 
 test "PackedSlice stores booleans and fully declared enums without needing value validation" {
@@ -283,6 +317,7 @@ test "PackedSlice views reject an incomplete element count or packed data" {
     _ = try Block.encode(&buffer, &.{ 1, 2, 7 });
     for (0..buffer.len) |length| {
         try std.testing.expectError(error.BufferTooSmall, Block.view(buffer[0..length]));
+        try std.testing.expectError(error.BufferTooSmall, Block.viewMutable(buffer[0..length]));
         try std.testing.expectError(error.BufferTooSmall, Block.viewAssumeValid(buffer[0..length]));
     }
 }
@@ -386,4 +421,40 @@ test "PackedSlice get() rejects an index at or beyond the element count" {
     const empty_written = try Block.encode(&buffer, &.{});
     const empty_view = try Block.view(buffer[0..empty_written]);
     try std.testing.expectError(error.IndexOutOfBounds, empty_view.get(0));
+}
+
+test "PackedSlice set() replaces bits as expected" {
+    inline for (.{ u3, u9, u65 }) |T| {
+        const Block = PackedSlice(T);
+        comptime try std.testing.expect(!@hasDecl(Block.View, "set"));
+        var expected = [_]T{std.math.maxInt(T)} ** 9;
+        var buffer: [4 + 9 * @sizeOf(T)]u8 align(Block.alignment) = undefined;
+        var reference: [buffer.len]u8 align(Block.alignment) = undefined;
+        const written = try Block.encode(&buffer, &expected);
+        for (0..expected.len) |index| {
+            for ([_]T{ 0, 1, std.math.maxInt(T) }) |replacement| {
+                {
+                    const view = try Block.viewMutable(buffer[0..written]);
+                    try view.set(index, replacement);
+                    try std.testing.expectEqual(replacement, try view.get(index));
+                }
+                expected[index] = replacement;
+                _ = try Block.encode(&reference, &expected);
+                try std.testing.expectEqualSlices(u8, reference[0..written], buffer[0..written]);
+                _ = try Block.view(buffer[0..written]);
+            }
+        }
+        const before = buffer;
+        const view = try Block.viewMutable(buffer[0..written]);
+        for ([_]usize{ view.len(), std.math.maxInt(usize) }) |index| {
+            try std.testing.expectError(error.IndexOutOfBounds, view.set(index, 0));
+        }
+        try std.testing.expectEqualSlices(u8, before[0..written], buffer[0..written]);
+    }
+
+    const Block = PackedSlice(u3);
+    var empty: [4]u8 align(Block.alignment) = undefined;
+    _ = try Block.encode(&empty, &.{});
+    const view = try Block.viewMutable(&empty);
+    try std.testing.expectError(error.IndexOutOfBounds, view.set(0, 1));
 }

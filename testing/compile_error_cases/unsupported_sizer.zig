@@ -1,4 +1,4 @@
-// Sizer can count rows for Columns, but it has no incremental sizing support for ordinary slices
+// Sizer can count rows for Columns, but it has no incremental sizing support for one-dimensional slices
 
 const stash = @import("stash");
 const Format = stash.Layout(struct { values: []const u32 });

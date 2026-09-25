@@ -75,8 +75,7 @@ const cases = [_]struct { name: []const u8, expected_message: []const u8 }{
     .{ .name = "zero_sized_slice", .expected_message = "stash: slices cannot store zero-sized elements" },
     .{ .name = "zero_sized_ragged", .expected_message = "stash: ragged slices do not support zero-sized elements" },
 
-    .{ .name = "unsupported_mutable", .expected_message = "stash: mutable views support only fixed values and ordinary slices" },
-    .{ .name = "unsupported_initialization", .expected_message = "stash: mutable views support only fixed values and ordinary slices" },
+    .{ .name = "unsupported_initialization", .expected_message = "stash: initialization supports only fixed values and one-dimensional slices" },
     .{ .name = "unsupported_sizer", .expected_message = "stash: Sizer supports only fixed values and Columns" },
     .{ .name = "append_fixed_field", .expected_message = "stash: tryAppend requires a columnar field" },
 };
