@@ -18,6 +18,9 @@ const runtime_validation = @import("../runtime_validation.zig");
 const packed_slice = @import("packed_slice.zig");
 const ragged_slice = @import("ragged_slice.zig");
 
+const ViewMode = enum { read_only, mutable };
+const Validation = enum { checked, assume_valid };
+
 pub fn ColumnOptions(comptime Row: type) type {
     comptime comptime_validation.assertStructHasSupportedSchemaFields(Row, "Columns");
     return struct {
@@ -62,68 +65,74 @@ pub fn Columns(comptime Row: type, comptime options: ColumnOptions(Row)) type {
         pub const stash_block_info = .{ .kind = .columnar, .Element = Row, .options = options };
         pub const alignment = blockAlignment(&columns);
         pub const Input = []const Row;
-        const ColumnViews = columnViewsType(&columns);
         pub const Field = std.meta.FieldEnum(Row);
 
-        pub const View = struct {
-            row_count: usize,
-            columns: ColumnViews,
+        pub const View = ViewType(.read_only);
+        pub const MutableView = ViewType(.mutable);
+        pub const RowIterator = View.Iterator;
 
-            pub fn len(self: @This()) usize {
-                return self.row_count;
-            }
+        fn ViewType(comptime view_mode: ViewMode) type {
+            return struct {
+                row_count: usize,
+                columns: columnViewsType(&columns, view_mode),
 
-            /// Return a view of one field across all rows.
-            /// Ordinary columns return slices. Packed and ragged columns provide len() and get()
-            pub fn column(
-                self: @This(),
-                comptime field: Field,
-            ) fieldView(columns[@intFromEnum(field)]) {
-                return @field(self.columns, @tagName(field));
-            }
-
-            /// Read one field from the row at index i, regardless of how its column is stored
-            pub fn value(
-                self: @This(),
-                comptime field: Field,
-                index: usize,
-            ) blocks.IndexError!columns[@intFromEnum(field)].type {
-                if (index >= self.row_count) return error.IndexOutOfBounds;
-                const column_view = self.column(field);
-                return switch (columns[@intFromEnum(field)].kind) {
-                    .fixed => column_view[index],
-                    .packed_bits, .ragged_slice => column_view.get(index),
-                };
-            }
-
-            /// Return the row at index i by collecting its fields from the respective columns
-            /// Think of this as row-level access in columnar data, not super efficient but possible
-            pub fn get(self: @This(), index: usize) blocks.IndexError!Row {
-                if (index >= self.row_count) return error.IndexOutOfBounds;
-                var row: Row = undefined;
-                inline for (row_fields) |field| {
-                    @field(row, field.name) = try self.value(@field(Field, field.name), index);
+                pub fn len(self: @This()) usize {
+                    return self.row_count;
                 }
-                return row;
-            }
 
-            /// Read the stored rows in order
-            pub fn iterator(self: @This()) RowIterator {
-                return .{ .view = self };
-            }
-        };
+                /// Return a view of one field across all rows.
+                /// Ordinary columns return slices. Packed and ragged columns provide len() and get().
+                /// Mutable views allow edits through those slices and packed columns' set() methods
+                pub fn column(
+                    self: @This(),
+                    comptime field: Field,
+                ) fieldView(columns[@intFromEnum(field)], view_mode) {
+                    return @field(self.columns, @tagName(field));
+                }
 
-        pub const RowIterator = struct {
-            view: View,
-            index: usize = 0,
+                /// Read one field from the row at index i, regardless of how its column is stored
+                pub fn value(
+                    self: @This(),
+                    comptime field: Field,
+                    index: usize,
+                ) blocks.IndexError!columns[@intFromEnum(field)].type {
+                    if (index >= self.row_count) return error.IndexOutOfBounds;
+                    const column_view = self.column(field);
+                    return switch (columns[@intFromEnum(field)].kind) {
+                        .fixed => column_view[index],
+                        .packed_bits, .ragged_slice => column_view.get(index),
+                    };
+                }
 
-            /// Return the next row, or null when there are no rows left
-            pub fn next(self: *RowIterator) ?Row {
-                if (self.index >= self.view.len()) return null;
-                defer self.index += 1;
-                return self.view.get(self.index) catch unreachable;
-            }
-        };
+                /// Return the row at index i by collecting its fields from the respective columns
+                /// Think of this as row-level access in columnar data, not super efficient but possible
+                pub fn get(self: @This(), index: usize) blocks.IndexError!Row {
+                    if (index >= self.row_count) return error.IndexOutOfBounds;
+                    var row: Row = undefined;
+                    inline for (row_fields) |field| {
+                        @field(row, field.name) = try self.value(@field(Field, field.name), index);
+                    }
+                    return row;
+                }
+
+                /// Read the stored rows in order
+                pub fn iterator(self: @This()) Iterator {
+                    return .{ .view = self };
+                }
+
+                const Iterator = struct {
+                    view: ViewType(view_mode),
+                    index: usize = 0,
+
+                    /// Return the next row, or null when there are no rows left
+                    pub fn next(self: *@This()) ?Row {
+                        if (self.index >= self.view.len()) return null;
+                        defer self.index += 1;
+                        return self.view.get(self.index) catch unreachable;
+                    }
+                };
+            };
+        }
 
         /// Include the header, column table, alignment gaps, and column contents
         pub fn encodedSize(rows: Input) blocks.BufferSizeError!usize {
@@ -219,7 +228,7 @@ pub fn Columns(comptime Row: type, comptime options: ColumnOptions(Row)) type {
 
         /// Check the column positions and stored values before returning a view
         pub fn view(buffer: []const u8) blocks.ViewError!View {
-            return viewImpl(buffer, true);
+            return viewImpl(buffer, .checked);
         }
 
         /// Return a view without scanning the stored values or ragged offsets. Use this when those
@@ -227,13 +236,26 @@ pub fn Columns(comptime Row: type, comptime options: ColumnOptions(Row)) type {
         /// Note that the column positions, sizes, and padding are still checked
         pub fn viewAssumeValid(buffer: []const u8) blocks.ViewError!View {
             // My rationale is that they're easy to amortize and valuable, so why not
-            return viewImpl(buffer, false);
+            return viewImpl(buffer, .assume_valid);
         }
 
-        fn viewImpl(
-            buffer: []const u8,
-            comptime validate_values: bool,
-        ) blocks.ViewError!View {
+        /// Validate the buffer and return mutable columns in place
+        pub fn viewMutable(buffer: []u8) blocks.ViewError!MutableView {
+            const checked = try view(buffer);
+            var result: MutableView = .{ .row_count = checked.row_count, .columns = undefined };
+            // Every column borrows this mutable buffer. Make its elements writable, leaving offsets read-only
+            inline for (columns) |column| {
+                const source = @field(checked.columns, column.name);
+                @field(result.columns, column.name) = switch (column.kind) {
+                    .fixed => @constCast(source),
+                    .ragged_slice => .{ .offsets = source.offsets, .values = @constCast(source.values) },
+                    .packed_bits => .{ .data = @constCast(source.data), .count = source.count },
+                };
+            }
+            return result;
+        }
+
+        fn viewImpl(buffer: []const u8, comptime validation: Validation) blocks.ViewError!View {
             if (buffer.len < dataStartOffset(columns.len)) return error.BufferTooSmall;
 
             const header = bytes.copyValue(ColumnarHeader, buffer) catch unreachable;
@@ -264,21 +286,36 @@ pub fn Columns(comptime Row: type, comptime options: ColumnOptions(Row)) type {
                 if (!std.mem.allEqual(u8, buffer[previous_column_end..offset], 0)) return error.InvalidFormat;
                 previous_column_end = end;
 
-                const field_view = try viewField(
-                    column,
-                    buffer[offset..end],
-                    row_count,
-                    validate_values,
-                );
-
-                if (comptime validate_values and column.kind == .fixed) {
-                    try runtime_validation.validateValues(column.type, buffer[offset..end], row_count);
-                }
-                if (comptime validate_values and column.kind == .packed_bits and runtime_validation.needsPackedValueValidation(column.type)) {
-                    for (0..row_count) |index| try packed_slice.validateElement(column.type, buffer[offset..end], index);
-                }
-
-                @field(result.columns, column.name) = field_view;
+                const column_buffer = buffer[offset..end];
+                @field(result.columns, column.name) = switch (column.kind) {
+                    .fixed => blk: {
+                        const expected = std.math.mul(usize, row_count, @sizeOf(column.type)) catch return error.InvalidFormat;
+                        if (column_buffer.len != expected) return error.InvalidFormat;
+                        const values = try bytes.viewSlice(column.type, column_buffer, row_count);
+                        if (comptime validation == .checked) {
+                            try runtime_validation.validateValues(column.type, column_buffer, row_count);
+                        }
+                        break :blk values;
+                    },
+                    .ragged_slice => blk: {
+                        const Block = ragged_slice.RaggedSliceBlock(sliceChild(column.type));
+                        const children = if (validation == .checked)
+                            try Block.view(column_buffer)
+                        else
+                            try Block.viewAssumeValid(column_buffer);
+                        if (children.len() != row_count) return error.InvalidFormat;
+                        break :blk children;
+                    },
+                    .packed_bits => blk: {
+                        const expected = packed_slice.packedByteCount(column.type, row_count) catch return error.InvalidFormat;
+                        if (column_buffer.len != expected) return error.InvalidFormat;
+                        try packed_slice.validateRegionPadding(column.type, column_buffer, row_count);
+                        if (comptime validation == .checked and runtime_validation.needsPackedValueValidation(column.type)) {
+                            for (0..row_count) |index| try packed_slice.validateElement(column.type, column_buffer, index);
+                        }
+                        break :blk .{ .data = column_buffer, .count = row_count };
+                    },
+                };
             }
 
             if (previous_column_end != buffer.len) return error.InvalidFormat;
@@ -371,13 +408,13 @@ fn dataStartOffset(column_count: usize) usize {
 }
 
 // Preserve the row field names so callers can access columns by name
-fn columnViewsType(comptime columns: []const Column) type {
+fn columnViewsType(comptime columns: []const Column, comptime view_mode: ViewMode) type {
     var field_names: [columns.len][]const u8 = undefined;
     var field_types: [columns.len]type = undefined;
     var field_attrs: [columns.len]std.builtin.Type.StructField.Attributes = undefined;
 
     for (columns, 0..) |column, index| {
-        const FieldView = fieldView(column);
+        const FieldView = fieldView(column, view_mode);
         field_names[index] = column.name;
         field_types[index] = FieldView;
         field_attrs[index] = .{ .@"align" = @alignOf(FieldView) };
@@ -439,67 +476,12 @@ fn encodeRaggedField(
     return writer.finish();
 }
 
-// Dispatch to the reader for this column's representation.
-// The buffer must contain exactly the column's bytes
-fn viewField(
-    comptime column: Column,
-    buffer: []const u8,
-    row_count: usize,
-    comptime validate_values: bool,
-) blocks.ViewError!fieldView(column) {
+fn fieldView(comptime column: Column, comptime view_mode: ViewMode) type {
     return switch (column.kind) {
-        .fixed => viewFixedField(column.type, buffer, row_count),
-        .ragged_slice => viewRaggedField(
-            column.type,
-            buffer,
-            row_count,
-            validate_values,
-        ),
-        .packed_bits => viewPackedField(column.type, buffer, row_count),
+        .fixed => if (view_mode == .mutable) []column.type else []const column.type,
+        .ragged_slice => if (view_mode == .mutable) ragged_slice.RaggedSliceBlock(sliceChild(column.type)).MutableView else ragged_slice.RaggedSliceBlock(sliceChild(column.type)).View,
+        .packed_bits => if (view_mode == .mutable) packed_slice.PackedSlice(column.type).MutableView else packed_slice.PackedSlice(column.type).View,
     };
-}
-
-fn fieldView(comptime column: Column) type {
-    return switch (column.kind) {
-        .fixed => []const column.type,
-        .ragged_slice => ragged_slice.RaggedSliceBlock(sliceChild(column.type)).View,
-        .packed_bits => packed_slice.PackedSlice(column.type).View,
-    };
-}
-
-// Check that the packed bytes match the row count, then return a view of the values
-fn viewPackedField(
-    comptime T: type,
-    buffer: []const u8,
-    row_count: usize,
-) blocks.ViewError!packed_slice.PackedSlice(T).View {
-    const expected = packed_slice.packedByteCount(T, row_count) catch return error.InvalidFormat;
-    if (buffer.len != expected) return error.InvalidFormat;
-    try packed_slice.validateRegionPadding(T, buffer, row_count);
-    return .{ .data = buffer, .count = row_count };
-}
-
-// Check that the bytes hold row_count values of T and return a slice into the buffer
-fn viewFixedField(comptime T: type, buffer: []const u8, row_count: usize) blocks.ViewError![]const T {
-    const expected_size = std.math.mul(usize, row_count, @sizeOf(T)) catch return error.InvalidFormat;
-    if (buffer.len != expected_size) return error.InvalidFormat;
-    return bytes.viewSlice(T, buffer, row_count) catch |err| switch (err) {
-        error.BufferTooSmall => return error.InvalidFormat,
-        error.MisalignedBuffer => return error.MisalignedBuffer,
-    };
-}
-
-// Read a ragged column and check that it contains one slice per row
-fn viewRaggedField(
-    comptime Slice: type,
-    buffer: []const u8,
-    row_count: usize,
-    comptime validate_values: bool,
-) blocks.ViewError!ragged_slice.RaggedSliceBlock(sliceChild(Slice)).View {
-    const Block = ragged_slice.RaggedSliceBlock(sliceChild(Slice));
-    const view = if (comptime validate_values) try Block.view(buffer) else try Block.viewAssumeValid(buffer);
-    if (view.len() != row_count) return error.InvalidFormat;
-    return view;
 }
 
 test "Columns writes fixed-size, ragged, and packed columns in the expected byte format" {
@@ -609,6 +591,7 @@ test "Columns writes consistent padding and rejects nonzero bytes between column
     try std.testing.expect(std.mem.allEqual(u8, first[padding_start..second_entry.offset], 0));
     first[padding_start] = 1;
     try std.testing.expectError(error.InvalidFormat, Block.view(first[0..first_len]));
+    try std.testing.expectError(error.InvalidFormat, Block.viewMutable(first[0..first_len]));
     try std.testing.expectError(error.InvalidFormat, Block.viewAssumeValid(first[0..first_len]));
 }
 
@@ -642,6 +625,7 @@ test "Columns view() rejects an undeclared enum tag in a packed column" {
     std.mem.writePackedInt(u3, buffer[status_entry.offset..][0..status_entry.size], 3, 6, .little);
 
     try std.testing.expectError(error.InvalidValue, Block.view(buffer[0..written]));
+    try std.testing.expectError(error.InvalidValue, Block.viewMutable(buffer[0..written]));
 }
 
 test "Columns views reject a packed column that is too short for the declared row count" {
@@ -670,6 +654,7 @@ test "Columns views reject a packed column that is too short for the declared ro
     });
 
     try std.testing.expectError(error.InvalidFormat, Block.view(buffer[0..]));
+    try std.testing.expectError(error.InvalidFormat, Block.viewMutable(buffer[0..]));
     try std.testing.expectError(error.InvalidFormat, Block.viewAssumeValid(buffer[0..]));
 }
 
@@ -694,6 +679,7 @@ test "Columns view() rejects an undeclared enum tag in an ordinary column" {
     buffer[status_entry.offset + 1] = 9;
 
     try std.testing.expectError(error.InvalidValue, Block.view(buffer[0..written]));
+    try std.testing.expectError(error.InvalidValue, Block.viewMutable(buffer[0..written]));
 }
 
 test "Columns view() rejects overlapping columns" {
@@ -722,6 +708,7 @@ test "Columns view() rejects overlapping columns" {
     // End the buffer at the overlapping columns so trailing bytes cannot explain the failure
     const end = entry_b.offset + entry_b.size;
     try std.testing.expectError(error.InvalidFormat, Block.view(buffer[0..end]));
+    try std.testing.expectError(error.InvalidFormat, Block.viewMutable(buffer[0..end]));
     try std.testing.expectError(error.InvalidFormat, Block.viewAssumeValid(buffer[0..end]));
 }
 
@@ -738,6 +725,7 @@ test "Columns view() rejects trailing bytes past the last column" {
     // The extra byte does not belong to any column
     buffer[written] = 0;
     try std.testing.expectError(error.InvalidFormat, Block.view(buffer[0 .. written + 1]));
+    try std.testing.expectError(error.InvalidFormat, Block.viewMutable(buffer[0 .. written + 1]));
     try std.testing.expectError(
         error.InvalidFormat,
         Block.viewAssumeValid(buffer[0 .. written + 1]),

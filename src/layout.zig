@@ -66,7 +66,6 @@ pub fn Layout(comptime Schema: type) type {
     const layout_fields = layout_info.@"struct".fields;
     return struct {
         const Self = @This();
-        const WriteMode = enum { copy_input, initialize_in_place };
         const BlockByteRange = struct { offset: usize, size: usize };
         const BlockByteRanges = [layout_fields.len]BlockByteRange;
 
@@ -185,7 +184,7 @@ pub fn Layout(comptime Schema: type) type {
 
         // We need each block's size to calculate the required buffer capacity and place the blocks.
         // Use this when writing existing values and slices from Input.
-        // Return the sizes in schema field order so writeImpl() can reuse them
+        // Return the sizes in schema field order so writing can reuse them
         fn calculateEncodedBlockSizes(input: Input) BufferSizeError!BlockSizes {
             var sizes: BlockSizes = undefined;
             inline for (layout_fields, 0..) |field, index| {
@@ -201,7 +200,7 @@ pub fn Layout(comptime Schema: type) type {
         fn calculateInitializedBlockSizes(initial_values: Init) BufferSizeError!BlockSizes {
             var sizes: BlockSizes = undefined;
             inline for (layout_fields, 0..) |field, index| {
-                const Block = mutableBlock(field);
+                const Block = initializableBlock(field);
                 sizes[index] = try Block.initializedSize(@field(initial_values, field.name));
             }
             return sizes;
@@ -258,7 +257,7 @@ pub fn Layout(comptime Schema: type) type {
         /// If you want to allocate space for your slice elements in the buffer first and then fill
         /// them in through mutable views, use initialize().
         pub fn write(buffer: []align(alignment) u8, input: Input) WriteError![]align(alignment) u8 {
-            return writeImpl(.copy_input, buffer, input, try calculateEncodedBlockSizes(input));
+            return writeInput(buffer, input, try calculateEncodedBlockSizes(input));
         }
 
         /// Use Init to specify the starting contents of the buffer when calling initialize().
@@ -266,7 +265,7 @@ pub fn Layout(comptime Schema: type) type {
         /// to create n elements filled with x, which you can then modify through the returned view
         pub const Init = MappedStruct(layout_fields, false, struct {
             fn map(comptime field: std.builtin.Type.StructField) type {
-                const Block = mutableBlock(field);
+                const Block = initializableBlock(field);
                 return Block.Init;
             }
         }.map);
@@ -282,55 +281,68 @@ pub fn Layout(comptime Schema: type) type {
             return totalEncodedSize(try calculateInitializedBlockSizes(initial_values));
         }
 
-        /// When you want to build data directly in its final buffer, use initialize(). It will write your
+        /// When you want to build data directly in its final buffer, use initialize(). This writes your
         /// starting values into the buffer and return mutable views so you can fill in the data in place.
         /// For each slice, provide its length and a value to fill it with. For example,
         /// .{ .count = 3, .value = 0 } creates { 0, 0, 0 }.
         ///
-        /// This supports value fields and ordinary slices, returning the encoded bytes along with mutable
+        /// This only supports value fields and slices currently, returning the encoded bytes along with mutable
         /// views into them. initializedSize(initial_values) will help you compute the required buffer size
         pub fn initialize(buffer: []align(alignment) u8, initial_values: Init) WriteError!Initialized {
-            return writeImpl(.initialize_in_place, buffer, initial_values, try calculateInitializedBlockSizes(initial_values));
-        }
-
-        // Reuse sizes measured from the unchanged input, returning views when initializing storage
-        fn writeImpl(
-            comptime mode: WriteMode,
-            buffer: []align(alignment) u8,
-            input: if (mode == .initialize_in_place) Init else Input,
-            sizes: BlockSizes,
-        ) WriteError!(if (mode == .initialize_in_place) Initialized else []align(alignment) u8) {
+            const sizes = try calculateInitializedBlockSizes(initial_values);
             const total_size = try totalEncodedSize(sizes);
             if (total_size > buffer.len) return error.NoSpaceLeft;
-            const size_table_offset = total_size - sizeTableByteCount();
-            var views: if (mode == .initialize_in_place) MutableView else void = undefined;
+            const payload = buffer[0..total_size];
+            const ranges = writeBlockMetadata(payload, sizes);
 
+            var views: MutableView = undefined;
+            inline for (layout_fields, ranges) |field, range| {
+                const Block = initializableBlock(field);
+                // Sizing and placement established each block's capacity and alignment
+                @field(views, field.name) = Block.initialize(
+                    payload[range.offset..][0..range.size],
+                    @field(initial_values, field.name),
+                ) catch unreachable;
+            }
+            return .{ .bytes = payload, .view = views };
+        }
+
+        // Both write() and alloc() reuse the block sizes measured from their input
+        fn writeInput(buffer: []align(alignment) u8, input: Input, sizes: BlockSizes) WriteError![]align(alignment) u8 {
+            const total_size = try totalEncodedSize(sizes);
+            if (total_size > buffer.len) return error.NoSpaceLeft;
+            const payload = buffer[0..total_size];
+            const ranges = writeBlockMetadata(payload, sizes);
+
+            inline for (layout_fields, ranges) |field, range| {
+                const Block = blocks.resolveBlockType(field.type);
+                // Sizing and placement established each block's capacity and alignment
+                const written = Block.encode(
+                    payload[range.offset..][0..range.size],
+                    @field(input, field.name),
+                ) catch unreachable;
+                std.debug.assert(written == range.size);
+            }
+            return payload;
+        }
+
+        // Place the blocks at their appropriate offsets and write the trailing metadata table.
+        fn writeBlockMetadata(buffer: []align(alignment) u8, sizes: BlockSizes) BlockByteRanges {
+            const size_table_offset = buffer.len - sizeTableByteCount();
+            var ranges: BlockByteRanges = undefined;
             var cursor: usize = 0;
             inline for (layout_fields, sizes, 0..) |field, size, field_index| {
                 const Block = blocks.resolveBlockType(field.type);
                 const offset = std.mem.alignForward(usize, cursor, Block.alignment);
-                const end = offset + size;
                 @memset(buffer[cursor..offset], 0);
-                const value = @field(input, field.name);
-
-                // Sizing already checked the block's limits and the destination has enough space.
-                // The aligned base and block offset also establish the required alignment.
-                if (comptime mode == .initialize_in_place) {
-                    @field(views, field.name) = Block.initialize(buffer[offset..end], value) catch unreachable;
-                } else {
-                    const written = Block.encode(buffer[offset..end], value) catch unreachable;
-                    std.debug.assert(written == size);
-                }
+                ranges[field_index] = .{ .offset = offset, .size = size };
 
                 const size_entry_offset = size_table_offset + field_index * @sizeOf(u64);
                 bytes.writeValue(u64, buffer[size_entry_offset..][0..@sizeOf(u64)], @intCast(size));
-                cursor = end;
+                cursor = offset + size;
             }
-
             @memset(buffer[cursor..size_table_offset], 0);
-            const payload = buffer[0..total_size];
-            if (comptime mode == .initialize_in_place) return .{ .bytes = payload, .view = views };
-            return payload;
+            return ranges;
         }
 
         /// Allocate an aligned buffer and write the input into it. The caller must free the returned buffer.
@@ -343,7 +355,7 @@ pub fn Layout(comptime Schema: type) type {
             const size = try totalEncodedSize(sizes);
             const buffer = try allocator.alignedAlloc(u8, .fromByteUnits(alignment), size);
             // Reuse the same sizes that established the allocation's size and format limits
-            const payload = writeImpl(.copy_input, buffer, input, sizes) catch unreachable;
+            const payload = writeInput(buffer, input, sizes) catch unreachable;
             std.debug.assert(payload.len == size);
             return buffer;
         }
@@ -361,11 +373,10 @@ pub fn Layout(comptime Schema: type) type {
             return viewImpl(payload, false);
         }
 
-        /// Mutable access to stored values and ordinary slices. Blocks cannot be resized or moved.
-        /// Assigning a different slice to a view field does not resize the stored block
+        /// In-place mutable access to every field in the layout
         pub const MutableView = MappedStruct(layout_fields, false, struct {
             fn map(comptime field: std.builtin.Type.StructField) type {
-                const Block = mutableBlock(field);
+                const Block = blocks.resolveBlockType(field.type);
                 return Block.MutableView;
             }
         }.map);
@@ -378,7 +389,7 @@ pub fn Layout(comptime Schema: type) type {
             const ranges = try Self.readBlockByteRanges(payload);
             var result: MutableView = undefined;
             inline for (layout_fields, 0..) |field, field_index| {
-                const Block = mutableBlock(field);
+                const Block = blocks.resolveBlockType(field.type);
                 const range = ranges[field_index];
                 @field(result, field.name) = Block.viewMutable(payload[range.offset..][0..range.size]) catch |err| switch (err) {
                     error.InvalidValue => return error.InvalidValue,
@@ -390,12 +401,12 @@ pub fn Layout(comptime Schema: type) type {
             return result;
         }
 
-        // Resolve the field's block type and check that it supports mutable views
-        fn mutableBlock(comptime field: std.builtin.Type.StructField) type {
+        // Resolve the field's block type and check that it supports initialization
+        fn initializableBlock(comptime field: std.builtin.Type.StructField) type {
             const Block = blocks.resolveBlockType(field.type);
-            if (!@hasDecl(Block, "MutableView") or !@hasDecl(Block, "viewMutable")) {
-                @compileError("stash: mutable views support only fixed values and ordinary slices\n" ++
-                    "  layout field '" ++ field.name ++ "' does not support mutable views");
+            if (!@hasDecl(Block, "Init") or !@hasDecl(Block, "initialize") or !@hasDecl(Block, "initializedSize")) {
+                @compileError("stash: initialization supports only fixed values and ordinary slices\n" ++
+                    "  layout field '" ++ field.name ++ "' does not support initialization");
             }
             return Block;
         }
@@ -1059,4 +1070,64 @@ test "Layout Input preserves field defaults and makes slice elements const" {
     inline for (@typeInfo(Format.View).@"struct".fields) |field| {
         try std.testing.expect(field.default_value_ptr == null);
     }
+}
+
+test "Layout viewMutable() edits every block type without changing the stored structure" {
+    const Status = enum(u8) { pending, complete };
+    const Row = struct { score: u32, name: []const u8, code: u3 };
+    const Format = Layout(struct {
+        status: Status,
+        numbers: []const u32,
+        names: []const []const u8,
+        flags: packed_slice.PackedSlice(bool),
+        rows: Columns(Row, .{ .packed_fields = &.{.code} }),
+    });
+    var buffer: [512]u8 align(Format.alignment) = undefined;
+    const payload = try Format.write(&buffer, .{
+        .status = .pending,
+        .numbers = &.{ 1, 2 },
+        .names = &.{ "one", "", "two" },
+        .flags = &.{ true, true, true },
+        .rows = &.{
+            .{ .score = 10, .name = "first", .code = 7 },
+            .{ .score = 20, .name = "", .code = 6 },
+            .{ .score = 30, .name = "third", .code = 7 },
+        },
+    });
+    {
+        const view = try Format.viewMutable(payload);
+        view.status.* = .complete;
+        view.numbers[1] = 42;
+        @memcpy(try view.names.get(0), "ONE");
+        try std.testing.expectEqual(0, (try view.names.get(1)).len);
+        try std.testing.expectError(error.IndexOutOfBounds, view.names.get(view.names.len()));
+        try view.flags.set(1, false);
+        view.rows.column(.score)[0] = 99;
+        @memcpy(try view.rows.column(.name).get(2), "THIRD");
+        try view.rows.column(.code).set(2, 0);
+
+        try std.testing.expectEqual(@as(u32, 99), try view.rows.value(.score, 0));
+        try std.testing.expectEqualDeep(Row{ .score = 30, .name = "THIRD", .code = 0 }, try view.rows.get(2));
+        var iterator = view.rows.iterator();
+        try std.testing.expectEqual(@as(u32, 99), iterator.next().?.score);
+        _ = iterator.next().?;
+        try std.testing.expectEqualStrings("THIRD", iterator.next().?.name);
+        try std.testing.expectEqual(null, iterator.next());
+    }
+
+    var reference: [512]u8 align(Format.alignment) = undefined;
+    const expected = try Format.write(&reference, .{
+        .status = .complete,
+        .numbers = &.{ 1, 42 },
+        .names = &.{ "ONE", "", "two" },
+        .flags = &.{ true, false, true },
+        .rows = &.{
+            .{ .score = 99, .name = "first", .code = 7 },
+            .{ .score = 20, .name = "", .code = 6 },
+            .{ .score = 30, .name = "THIRD", .code = 0 },
+        },
+    });
+    // Comparing the complete encoding also checks every header, offset, and padding byte
+    try std.testing.expectEqualSlices(u8, expected, payload);
+    _ = try Format.view(payload);
 }

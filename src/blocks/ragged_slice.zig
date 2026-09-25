@@ -12,6 +12,8 @@ const bytes = @import("../bytes.zig");
 const comptime_validation = @import("../comptime_validation.zig");
 const runtime_validation = @import("../runtime_validation.zig");
 
+const ViewMode = enum { read_only, mutable };
+
 pub fn RaggedSliceBlock(comptime T: type) type {
     comptime comptime_validation.assertStorable(T);
     if (@sizeOf(T) == 0) @compileError("stash: ragged slices do not support zero-sized elements\n" ++
@@ -22,24 +24,29 @@ pub fn RaggedSliceBlock(comptime T: type) type {
         pub const alignment = @max(@alignOf(u32), @alignOf(T));
         pub const Input = []const []const T;
 
-        pub const View = struct {
-            offsets: []const u32,
-            values: []const T,
+        pub const View = ViewType(.read_only);
+        pub const MutableView = ViewType(.mutable);
 
-            /// Return the number of child slices
-            pub fn len(self: View) usize {
-                return self.offsets.len - 1;
-            }
+        fn ViewType(comptime view_mode: ViewMode) type {
+            return struct {
+                offsets: []const u32,
+                values: if (view_mode == .mutable) []T else []const T,
 
-            /// Return a child slice that points into the buffer without copying its elements.
-            /// Return IndexOutOfBounds if index is at or beyond len()
-            pub fn get(self: View, index: usize) blocks.IndexError![]const T {
-                if (index >= self.len()) return error.IndexOutOfBounds;
-                const start: usize = self.offsets[index];
-                const end: usize = self.offsets[index + 1];
-                return self.values[start..end];
-            }
-        };
+                /// Return the number of child slices
+                pub fn len(self: @This()) usize {
+                    return self.offsets.len - 1;
+                }
+
+                /// Return a child slice that points into the buffer without copying its elements.
+                /// Return IndexOutOfBounds if index is at or beyond len()
+                pub fn get(self: @This(), index: usize) blocks.IndexError!(if (view_mode == .mutable) []T else []const T) {
+                    if (index >= self.len()) return error.IndexOutOfBounds;
+                    const start: usize = self.offsets[index];
+                    const end: usize = self.offsets[index + 1];
+                    return self.values[start..end];
+                }
+            };
+        }
 
         /// Return the number of bytes needed for the child count, offsets, padding, and elements
         pub fn encodedSize(children: Input) blocks.BufferSizeError!usize {
@@ -58,6 +65,13 @@ pub fn RaggedSliceBlock(comptime T: type) type {
             var writer = try RaggedSliceWriter(T).init(dest_buffer, children.len, element_count);
             for (children) |child| writer.append(child);
             return writer.finish();
+        }
+
+        /// Validate the buffer and return mutable child slices without exposing writable offsets
+        pub fn viewMutable(buffer: []u8) blocks.ViewError!MutableView {
+            const checked = try view(buffer);
+            // Only the elements become writable. Both slices point into the caller's mutable buffer
+            return .{ .offsets = checked.offsets, .values = @constCast(checked.values) };
         }
 
         /// Return a view, validating that the offset values are sensible and that boolean and enum values are valid
@@ -283,6 +297,7 @@ test "RaggedSliceBlock encode() aligns u64 elements and views reject nonzero pad
     for (20..24) |index| {
         buffer[index] = 1;
         try std.testing.expectError(error.InvalidFormat, Block.view(&buffer));
+        try std.testing.expectError(error.InvalidFormat, Block.viewMutable(&buffer));
         try std.testing.expectError(error.InvalidFormat, Block.viewAssumeValid(&buffer));
         buffer[index] = 0;
     }
@@ -322,6 +337,7 @@ test "RaggedSliceBlock view() rejects offsets that do not describe all stored el
             bytes.writeValue(u32, buffer[4 + index * 4 ..][0..4], offset);
         }
         try std.testing.expectError(error.InvalidFormat, Block.view(&buffer));
+        try std.testing.expectError(error.InvalidFormat, Block.viewMutable(&buffer));
     }
 }
 
@@ -332,10 +348,12 @@ test "RaggedSliceBlock views reject an incomplete count, offset table, or elemen
     // One child needs a four-byte count and two four-byte offsets
     for (0..12) |length| {
         try std.testing.expectError(error.BufferTooSmall, Block.view(buffer[0..length]));
+        try std.testing.expectError(error.BufferTooSmall, Block.viewMutable(buffer[0..length]));
         try std.testing.expectError(error.BufferTooSmall, Block.viewAssumeValid(buffer[0..length]));
     }
     for ([_]usize{ written - 1, written + 1 }) |length| {
         try std.testing.expectError(error.InvalidFormat, Block.view(buffer[0..length]));
+        try std.testing.expectError(error.InvalidFormat, Block.viewMutable(buffer[0..length]));
         try std.testing.expectError(error.InvalidFormat, Block.viewAssumeValid(buffer[0..length]));
     }
 }
@@ -356,6 +374,7 @@ test "RaggedSliceBlock encode() leaves an undersized or misaligned destination u
         _ = try Block.encode(buffer[0..], &children);
         std.mem.copyBackwards(u8, buffer[1..][0..byte_count], buffer[0..byte_count]);
         try std.testing.expectError(error.MisalignedBuffer, Block.view(buffer[1..][0..byte_count]));
+        try std.testing.expectError(error.MisalignedBuffer, Block.viewMutable(buffer[1..][0..byte_count]));
         try std.testing.expectError(
             error.MisalignedBuffer,
             Block.viewAssumeValid(buffer[1..][0..byte_count]),
@@ -380,6 +399,7 @@ test "RaggedSliceBlock view() checks boolean and enum values on both sides of an
         const original = buffer[index];
         buffer[index] = 2;
         try std.testing.expectError(error.InvalidValue, Block.view(&buffer));
+        try std.testing.expectError(error.InvalidValue, Block.viewMutable(&buffer));
         buffer[index] = original;
     }
 }

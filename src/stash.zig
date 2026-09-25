@@ -50,7 +50,9 @@ pub const assertStorable = comptime_validation.assertStorable;
 ///
 /// Format.alloc() supplies an aligned buffer. To write into a buffer you provide, use
 /// Format.encodedSize() to size it and Format.alignment for its alignment, then call Format.write().
-/// To create slice elements in the buffer before filling them in, use Format.initialize().
+/// To create placeholder slice elements in the buffer before filling them in, use Format.initialize().
+/// Format.viewMutable() lets you edit stored values in-place. The exact implementation varies
+/// by block type
 /// Keep the buffer valid and unchanged while read-only views are in use
 pub const Layout = layout.Layout;
 
@@ -68,9 +70,6 @@ pub const Layout = layout.Layout;
 /// // id:   { 1, 2 }
 /// // name: { "one", "two" }
 /// ```
-///
-/// view.rows.column(.id) returns the ID slice, and view.rows.get(index) reconstructs a row.
-/// Slice fields use ragged storage. Fields listed in packed_fields use packed bits
 pub const Columns = columnar.Columns;
 
 /// Choose which row fields use packed storage. Pass these options to Columns()
@@ -90,7 +89,8 @@ pub const ColumnOptions = columnar.ColumnOptions;
 ///
 /// Eight u3 elements occupy three data bytes plus a four-byte element count. Small slices
 /// can take more space than ordinary slices because of that count. Packed elements can
-/// share a byte, so get() returns a value rather than a pointer into the buffer
+/// share a byte, so get() returns a value rather than a pointer into the buffer.
+/// Mutable views provide set(index, value) to replace an element without changing its neighbors
 pub const PackedSlice = packed_slice.PackedSlice;
 
 // Include tests from every library module, including helpers not exposed by the public API
