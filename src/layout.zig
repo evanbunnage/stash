@@ -405,7 +405,7 @@ pub fn Layout(comptime Schema: type) type {
         fn initializableBlock(comptime field: std.builtin.Type.StructField) type {
             const Block = blocks.resolveBlockType(field.type);
             if (!@hasDecl(Block, "Init") or !@hasDecl(Block, "initialize") or !@hasDecl(Block, "initializedSize")) {
-                @compileError("stash: initialization supports only fixed values and ordinary slices\n" ++
+                @compileError("stash: initialization supports only fixed values and one-dimensional slices\n" ++
                     "  layout field '" ++ field.name ++ "' does not support initialization");
             }
             return Block;

@@ -88,7 +88,7 @@ pub const ColumnOptions = columnar.ColumnOptions;
 /// ```
 ///
 /// Eight u3 elements occupy three data bytes plus a four-byte element count. Small slices
-/// can take more space than ordinary slices because of that count. Packed elements can
+/// can take more space than slices stored without bit-packing because of that count. Packed elements can
 /// share a byte, so get() returns a value rather than a pointer into the buffer.
 /// Mutable views provide set(index, value) to replace an element without changing its neighbors
 pub const PackedSlice = packed_slice.PackedSlice;
