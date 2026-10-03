@@ -1,4 +1,12 @@
-//! Store vector elements as an array, then load them into a vector for arithmetic
+//! This example shows how to store SIMD vectors (@Vector). Stash rejects vectors because their memory
+//! layout isn't guaranteed to match an array's (bool vectors are bit-packed, and some lengths get extra
+//! padding, like @Vector(3, f32) taking 16 bytes). So instead, store an array and "convert" it with @Vector
+//!
+//! key takeaways:
+//! - store [N]T instead of @Vector(N, T)
+//! - assign the vector to an array when writing, and the array back to a vector when reading
+//! - converting the stored array to a vector costs nothing extra at read time: it compiles to the same single
+//!   load as reading a vector directly
 //!
 //! cd examples && zig build example_15
 

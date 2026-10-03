@@ -1,4 +1,4 @@
-//! Inspect the schema and stored bytes of Mars rover telemetry
+//! Inspect the schema and stored bytes using stash's provided debug tooling
 //!
 //! cd examples && zig build example_08
 

@@ -1,6 +1,16 @@
-//! Store a null-terminated string and check its terminator when reading it
+//! This example shows how to store null-terminated strings ([:0]const u8), like the ones you'd pass to C.
 //!
-//! cd examples && zig build example_17
+//! Stash schemas can't use [:0]const u8 yet. That type guarantees a zero byte right after the string, but
+//! stash's views point into stored bytes, where the next byte might belong to another field or be
+//! corrupted. So store the zero as the slice's last byte, then check it before converting back to
+//! [:0]const u8.
+//!
+//! key takeaways:
+//! - include the zero byte in the stored slice yourself (name[0 .. name.len + 1])
+//! - after view(), check that the last byte is zero before slicing back to [:0]const u8
+//! - also check for zeros inside the string if C code will read it (it would stop early)
+//!
+//! cd examples && zig build example_16
 
 const std = @import("std");
 const stash = @import("stash");
@@ -10,7 +20,7 @@ const Format = stash.Layout(struct {
 });
 
 pub fn main(init: std.process.Init) !void {
-    std.debug.print("Example 17: Stash null-terminated strings\n", .{});
+    std.debug.print("Example 16: Stash null-terminated strings\n", .{});
 
     const allocator = init.gpa;
     const name: [:0]const u8 = "stash";

@@ -1,13 +1,12 @@
 # Examples
 
-Run an example from the repository root using its two-digit number:
 
 ```sh
-zig build example_03
+cd examples/
+zig build example_08
 ```
 
-Start with [01_stash_values_and_slices.zig](01_stash_values_and_slices.zig) for the basic write/read workflow,
-then pick the example closest to your data:
+## Basic stash usage 
 
 | Example | What to look for |
 | --- | --- |
@@ -24,35 +23,15 @@ then pick the example closest to your data:
 
 ## Representing types that cannot be stored directly
 
-These examples choose an explicit stored representation for an application type.
-Stash validates the stored types. Your application checks relationships such as whether an index
-refers to an existing record.
+Stash raises compile errors if a type is not "stashable". These are some common cases and how to
+implement them in stash.
 
 | Example | What to look for |
 | --- | --- |
 | [11_stash_optional_values.zig](11_stash_optional_values.zig) | Distinguish an absent value from zero with an explicit presence flag |
 | [12_stash_tagged_unions.zig](12_stash_tagged_unions.zig) | Store a numbered tag and initialized fields for each alternative |
-| [13_stash_references.zig](13_stash_references.zig) | Replace pointers with record indices and check them before use |
+| [13_stash_pointer_references.zig](13_stash_pointer_references.zig) | Replace pointers with record indices and check them before use |
 | [14_stash_error_results.zig](14_stash_error_results.zig) | Map errors to stable status numbers and back to a Zig error union |
 | [15_stash_vectors.zig](15_stash_vectors.zig) | Store arrays and load them into vectors for arithmetic |
-| [16_stash_structs_with_padding.zig](16_stash_structs_with_padding.zig) | Initialize explicit padding and convert an application limit to a fixed-width integer |
-| [17_stash_null_terminated_strings.zig](17_stash_null_terminated_strings.zig) | Store a terminator explicitly and validate it before creating a sentinel slice |
+| [16_stash_null_terminated_strings.zig](16_stash_null_terminated_strings.zig) | Store a terminator explicitly and validate it before creating a sentinel slice |
 
-## Inspecting a format
-
-[08_inspect_a_layout.zig](08_inspect_a_layout.zig) prints the schema with `printSchema()` and a buffer’s
-layout with `printBufferLayout()`. Both print to stderr, separating data from stash metadata without
-printing stored values. Use `describe(writer)` or `inspect(buffer, writer)` to send output elsewhere.
-
-The file example writes to `.zig-cache`. The other examples work entirely in memory.
-Examples use checked views when opening stored data. Example 09 creates a mutable view with `initialize()`.
-Mutable views change the bytes in memory and preserve the stored shape.
-Writing those changes to disk remains the application's responsibility.
-
-Run every example with:
-
-```sh
-zig build examples
-```
-
-`zig build check` compiles the examples, and `zig build test` also runs them.

@@ -1,4 +1,16 @@
-//! Store successful results and errors using a numbered status enum
+//! This example shows how to store results that may be errors (E!T). Zig assigns error values to numbers when it
+//! at compile time, so the same error can get a different number in another build and error
+//! unions have no stable byte layout.
+//!
+//! Stash rejects both, so you map errors to a status enum with
+//! numbers you choose instead.
+//!
+//! takeaways:
+//! - give each error an explicit number in an enum with a fixed-size tag, like enum(u32)
+//! - never renumber statuses once data is stored, and add new ones with new numbers
+//! - store zero in the value for errors, so equal results always produce identical bytes
+//! - stash rejects any stored status the enum doesn't declare, so a newer status fails view() on older
+//!   code. Use a non-exhaustive enum (with `_`) if older code should accept statuses it doesn't know
 //!
 //! cd examples && zig build example_14
 
@@ -6,10 +18,11 @@ const std = @import("std");
 const stash = @import("stash");
 
 const LookupError = error{ NotFound, PermissionDenied };
-// These numbers belong to the file format, unlike Zig's error numbers
+
 const Status = enum(u32) { ok = 0, not_found = 1, permission_denied = 2 };
 const StoredResult = extern struct {
     status: Status,
+    // Errors keep the default of zero, so equal results always produce identical bytes
     value: u32 = 0,
 
     fn fromResult(result: LookupError!u32) StoredResult {

@@ -1,4 +1,11 @@
-//! Refer to stored records by index instead of saving memory addresses
+//! This exapmle shows how to store data that would normally use pointers (like trees/linked lists).
+//! Stash doesn't have nearly as much support for stashing/reading these data structures as rkyv yet,
+//! so it is a bit manual (but explicit!)
+//!
+//! Some key takeaways:
+//! - store indexes instead of pointers
+//! - use explicit values for null (like maxInt)
+//! - check indices at runtime before using them
 //!
 //! cd examples && zig build example_13
 

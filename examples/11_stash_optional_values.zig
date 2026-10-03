@@ -1,4 +1,12 @@
-//! Store optional values with a flag that distinguishes a missing value from zero
+//! This example shows how to store optional values (?T). Zig doesn't define a stable byte layout for
+//! optionals, so stash rejects them, and you store a presence flag next to the value instead.
+//! rkyv's archived Option uses the same layout (a tag plus the value) but checks the tag for you.
+//! User's of stash need to have their application read the flag itself.
+//!
+//! takeaways:
+//! - store a presence flag next to the value, so zero can be a real value instead of meaning "missing"
+//! - store zero in the value when it's absent, so equal optionals always produce identical bytes
+//! - stash checks that the flag is a valid bool, but your application decides what the pair means
 //!
 //! cd examples && zig build example_11
 
@@ -11,7 +19,7 @@ const OptionalCount = extern struct {
     reserved: [3]u8 = @splat(0),
 
     fn fromOptional(count: ?u32) OptionalCount {
-        // Even an absent value needs initialized bytes in the stored representation
+        // Store zero when absent, so equal optional values always produce identical bytes
         return .{ .count = count orelse 0, .present = count != null };
     }
 

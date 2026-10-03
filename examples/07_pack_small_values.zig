@@ -36,6 +36,11 @@ pub fn main(init: std.process.Init) !void {
     for (0..4) |index| {
         std.debug.print("State {d}: {s}\n", .{ index, @tagName(view.states.get(index)) });
     }
-    std.debug.print("64 two-bit states use 16 bytes for their values\n", .{});
+    std.debug.print("{d} {d}-bit values use {d} bytes packed, instead of {d} bytes unpacked\n", .{
+        view.states.len(),
+        @bitSizeOf(State),
+        view.states.data.len,
+        view.states.len() * @sizeOf(State),
+    });
     std.debug.print("Complete buffer with flags and metadata: {d} bytes\n", .{byte_buffer.len});
 }
