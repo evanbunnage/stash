@@ -26,6 +26,19 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&unit_tests.step);
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
+    // Property tests check generated inputs and corrupted buffers
+    const property_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("testing/properties.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "stash", .module = stash }},
+        }),
+        .filters = test_filters,
+    });
+    check_step.dependOn(&property_tests.step);
+    test_step.dependOn(&b.addRunArtifact(property_tests).step);
+
     compile_error_cases.addCases(b, check_step, stash);
     test_step.dependOn(check_step);
 

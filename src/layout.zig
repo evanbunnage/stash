@@ -26,10 +26,8 @@ const builtin = @import("builtin");
 
 const bytes = @import("bytes.zig");
 const blocks = @import("blocks.zig");
+const reports = @import("reports.zig");
 const packed_slice = @import("blocks/packed_slice.zig");
-const SliceBlock = @import("blocks/slice.zig").SliceBlock;
-const ValueBlock = @import("blocks/value.zig").ValueBlock;
-const RaggedSliceBlock = @import("blocks/ragged_slice.zig").RaggedSliceBlock;
 const Columns = @import("blocks/columnar.zig").Columns;
 
 /// Counts, byte sizes, and aligned positions must fit the layout's representation
@@ -110,6 +108,26 @@ pub fn Layout(comptime Schema: type) type {
         };
 
         const BlockSizes = [layout_fields.len]usize;
+
+        /// Return a report of the format's alignment and each field's storage and input type.
+        /// Print with {f}: std.debug.print("{f}\n", .{Format.describe()})
+        pub fn describe() reports.SchemaReport(Schema, alignment) {
+            return .{};
+        }
+
+        /// Validate a complete encoded buffer, then return a report of each field's byte offset and size,
+        /// alignment gaps, and the trailing size table, separating value bytes from stash overhead.
+        /// Explicit padding in stored types counts as value bytes. Packed values use whole bytes.
+        /// Print it with {f}: std.debug.print("{f}\n", .{try Format.inspect(buffer)}).
+        pub fn inspect(payload: []const u8) ViewError!reports.BufferReport(Schema, alignment, View, BlockByteRanges) {
+            // Use the same validation as view() before reporting anything about the buffer
+            return .{
+                .payload = payload,
+                .views = try view(payload),
+                .ranges = try readBlockByteRanges(payload),
+                .table_offset = try findBlockSizeTableOffset(payload),
+            };
+        }
 
         /// Return the buffer size needed to write the input, including padding and the block size table
         pub fn encodedSize(input: Input) BufferSizeError!usize {
@@ -204,38 +222,6 @@ pub fn Layout(comptime Schema: type) type {
                 sizes[index] = try Block.initializedSize(@field(initial_values, field.name));
             }
             return sizes;
-        }
-
-        /// Callers supply a byte size for every variable-size field, using its schema name.
-        /// Fixed-size fields are omitted because their blocks already determine their sizes.
-        pub const VariableBlockSizes = blk: {
-            var fields: [layout_fields.len]std.builtin.Type.StructField = undefined;
-            var count: usize = 0;
-            for (layout_fields) |field| {
-                const Block = blocks.resolveBlockType(field.type);
-                if (encodedSizeWithoutInput(Block) == null) {
-                    fields[count] = field;
-                    count += 1;
-                }
-            }
-            break :blk MappedStruct(fields[0..count], false, struct {
-                fn map(comptime _: std.builtin.Type.StructField) type {
-                    return usize;
-                }
-            }.map);
-        };
-
-        /// Calculate the required buffer size from known variable-size block sizes, including all layout overhead
-        pub fn encodedSizeFromBlockSizes(sizes: VariableBlockSizes) BufferSizeError!usize {
-            var all_sizes: BlockSizes = undefined;
-            inline for (layout_fields, 0..) |field, index| {
-                const Block = blocks.resolveBlockType(field.type);
-                all_sizes[index] = if (comptime encodedSizeWithoutInput(Block)) |size|
-                    size
-                else
-                    @field(sizes, field.name);
-            }
-            return totalEncodedSize(all_sizes);
         }
 
         // Include alignment padding and the size table in the total size
@@ -360,8 +346,22 @@ pub fn Layout(comptime Schema: type) type {
             return buffer;
         }
 
-        /// Validate the buffer's structure and stored values, then return read-only views of its fields.
-        /// The buffer must remain valid and immutable while any returned view or derived pointer or slice is in use
+        /// This is the main zero-copy access point for a stash layout.
+        ///
+        /// view() validates the buffer's structure and  stored enums/bools, then returns
+        /// typed read-only views of the layout's fields.
+        ///
+        /// The buffer must remain valid and immutable while any returned view or derived pointer or slice is in use.
+        /// It must be aligned to Format.alignment, otherwise this function returns MisalignedBuffer.
+        ///
+        /// We could enforce alignment at the type-level, but we still accept []const u8 of any
+        /// alignment for this function so buffers at offsets only known at runtime don't need an @alignCast
+        /// which can panic or cause UB depending on the build mode.
+        ///
+        /// Best practice with stash is to allocate buffers with Format.alignment. If you're storing
+        /// stash data in a larger buffer, then just make sure its offset is aligned to Format.alignment as well.
+        /// That way you can treat MisalignedBuffer errors as data corruption and handle appropriately
+        /// for your application.
         pub fn view(payload: []const u8) ViewError!View {
             return viewImpl(payload, true);
         }
@@ -476,7 +476,7 @@ pub fn Layout(comptime Schema: type) type {
     };
 }
 
-// Sizer and encodedSizeFromBlockSizes() must include value fields without receiving their values.
+// Sizer must include value fields without receiving their values.
 // Value blocks always occupy @sizeOf(T) bytes
 fn encodedSizeWithoutInput(comptime Block: type) ?usize {
     const block_info = Block.stash_block_info;
@@ -644,19 +644,19 @@ test "Layout sizing rejects overflow when adding blocks, alignment padding, or t
         });
         const max = std.math.maxInt(usize);
 
-        // These sizes overflow when aligning the second block, adding its bytes,
+        // These block sizes overflow when aligning the second block, adding its bytes,
         // or adding the size table. We can check each case without allocating the data
         try std.testing.expectError(
             error.InputTooLarge,
-            Format.encodedSizeFromBlockSizes(.{ .first = max, .second = 0 }),
+            Format.totalEncodedSize(.{ max, 0 }),
         );
         try std.testing.expectError(
             error.InputTooLarge,
-            Format.encodedSizeFromBlockSizes(.{ .first = max - 7, .second = 8 }),
+            Format.totalEncodedSize(.{ max - 7, 8 }),
         );
         try std.testing.expectError(
             error.InputTooLarge,
-            Format.encodedSizeFromBlockSizes(.{ .first = 0, .second = max - 7 }),
+            Format.totalEncodedSize(.{ 0, max - 7 }),
         );
     }
 }
@@ -839,7 +839,7 @@ test "Layout sizing accepts a 4 GiB block when it fits the target address space"
             const block_size = @as(usize, std.math.maxInt(u32)) + 1;
             try std.testing.expectEqual(
                 block_size + 8,
-                try Format.encodedSizeFromBlockSizes(.{ .values = block_size }),
+                try Format.totalEncodedSize(.{block_size}),
             );
             try std.testing.expectEqual(block_size + 8, try Format.initializedSize(.{
                 .values = .{ .count = block_size / @sizeOf(u64), .value = 0 },
@@ -847,7 +847,7 @@ test "Layout sizing accepts a 4 GiB block when it fits the target address space"
         } else {
             try std.testing.expectError(
                 error.InputTooLarge,
-                Format.encodedSizeFromBlockSizes(.{ .values = std.math.maxInt(usize) }),
+                Format.totalEncodedSize(.{std.math.maxInt(usize)}),
             );
         }
     }
@@ -882,50 +882,11 @@ test "Layout initialize() leaves the buffer unchanged when a slice size overflow
     try std.testing.expect(std.mem.allEqual(u8, &buffer, 99));
 }
 
-test "Layout encodedSizeFromBlockSizes() needs sizes only for fields whose size depends on the input" {
-    const RowColumns = Columns(struct { id: u32, name: []const u8 }, .{});
-    const Format = Layout(struct {
-        header: ValueBlock(u64),
-        empty: extern struct {},
-        values: []const u16,
-        names: []const []const u8,
-        flags: packed_slice.PackedSlice(u3),
-        rows: RowColumns,
-    });
-    const input: Format.Input = .{
-        .header = 7,
-        .empty = .{},
-        .values = &.{ 1, 2 },
-        .names = &.{ "cat", "", "hello" },
-        .flags = &.{ 1, 2, 3 },
-        .rows = &.{.{ .id = 1, .name = "one" }},
-    };
-    const size_fields = @typeInfo(Format.VariableBlockSizes).@"struct".fields;
-    try std.testing.expectEqual(4, size_fields.len);
-    inline for (size_fields, .{ "values", "names", "flags", "rows" }) |field, name| {
-        try std.testing.expectEqualStrings(name, field.name);
-        try std.testing.expect(field.type == usize);
-        try std.testing.expect(field.default_value_ptr == null);
-    }
-
-    // Only variable-size fields belong in the supplied sizes, regardless of their declaration order
-    const measured = try Format.encodedSizeFromBlockSizes(.{
-        .rows = try RowColumns.encodedSize(input.rows),
-        .flags = try packed_slice.PackedSlice(u3).encodedSize(input.flags),
-        .names = try RaggedSliceBlock(u8).encodedSize(input.names),
-        .values = input.values.len * @sizeOf(u16),
-    });
-    var buffer: [256]u8 align(Format.alignment) = undefined;
-    try std.testing.expectEqual(try Format.encodedSize(input), measured);
-    try std.testing.expectEqual((try Format.write(&buffer, input)).len, measured);
-}
-
 test "Layout sizing needs no input for empty schemas or schemas containing only fixed-size values" {
     const Fixed = Layout(struct { marker: u8, value: u64, empty: extern struct {} });
     const input: Fixed.Input = .{ .marker = 1, .value = 2, .empty = .{} };
     const expected = try Fixed.encodedSize(input);
     const sizer: Fixed.Sizer = .{};
-    try std.testing.expectEqual(expected, try Fixed.encodedSizeFromBlockSizes(.{}));
     try std.testing.expectEqual(expected, try sizer.encodedSize());
     const initial: Fixed.Init = .{ .marker = 1, .value = 2, .empty = .{} };
     try std.testing.expectEqual(expected, try Fixed.initializedSize(initial));
@@ -936,7 +897,6 @@ test "Layout sizing needs no input for empty schemas or schemas containing only 
 
     const Empty = Layout(struct {});
     const empty: Empty.Sizer = .{};
-    try std.testing.expectEqual(0, try Empty.encodedSizeFromBlockSizes(.{}));
     try std.testing.expectEqual(0, try empty.encodedSize());
 }
 
@@ -1061,9 +1021,9 @@ test "Layout Input preserves field defaults and makes slice elements const" {
     try std.testing.expectEqual(1, view.version.*);
     try std.testing.expectEqual(7, view.header.count);
     try std.testing.expectEqualSlices(u16, &values, view.values);
-    try std.testing.expectEqualStrings("one", try view.names.get(0));
-    try std.testing.expectEqualStrings("two", try view.names.get(1));
-    const row = try view.rows.get(0);
+    try std.testing.expectEqualStrings("one", view.names.get(0));
+    try std.testing.expectEqualStrings("two", view.names.get(1));
+    const row = view.rows.get(0);
     try std.testing.expectEqualStrings("abc", row.text);
     try std.testing.expectEqual(7, row.id);
     // Input defaults must not become defaults for pointers and slices in View
@@ -1098,21 +1058,15 @@ test "Layout viewMutable() edits every block type without changing the stored st
         const view = try Format.viewMutable(payload);
         view.status.* = .complete;
         view.numbers[1] = 42;
-        @memcpy(try view.names.get(0), "ONE");
-        try std.testing.expectEqual(0, (try view.names.get(1)).len);
-        try std.testing.expectError(error.IndexOutOfBounds, view.names.get(view.names.len()));
-        try view.flags.set(1, false);
+        @memcpy(view.names.get(0), "ONE");
+        try std.testing.expectEqual(0, view.names.get(1).len);
+        view.flags.set(1, false);
         view.rows.column(.score)[0] = 99;
-        @memcpy(try view.rows.column(.name).get(2), "THIRD");
-        try view.rows.column(.code).set(2, 0);
+        @memcpy(view.rows.column(.name).get(2), "THIRD");
+        view.rows.column(.code).set(2, 0);
 
-        try std.testing.expectEqual(@as(u32, 99), try view.rows.value(.score, 0));
-        try std.testing.expectEqualDeep(Row{ .score = 30, .name = "THIRD", .code = 0 }, try view.rows.get(2));
-        var iterator = view.rows.iterator();
-        try std.testing.expectEqual(@as(u32, 99), iterator.next().?.score);
-        _ = iterator.next().?;
-        try std.testing.expectEqualStrings("THIRD", iterator.next().?.name);
-        try std.testing.expectEqual(null, iterator.next());
+        try std.testing.expectEqual(@as(u32, 99), view.rows.value(.score, 0));
+        try std.testing.expectEqualDeep(Row{ .score = 30, .name = "THIRD", .code = 0 }, view.rows.get(2));
     }
 
     var reference: [512]u8 align(Format.alignment) = undefined;

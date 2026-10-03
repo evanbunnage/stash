@@ -37,10 +37,9 @@ pub fn RaggedSliceBlock(comptime T: type) type {
                     return self.offsets.len - 1;
                 }
 
-                /// Return a child slice that points into the buffer without copying its elements.
-                /// Return IndexOutOfBounds if index is at or beyond len()
-                pub fn get(self: @This(), index: usize) blocks.IndexError!(if (view_mode == .mutable) []T else []const T) {
-                    if (index >= self.len()) return error.IndexOutOfBounds;
+                /// Return a child slice that points into the buffer without copying its elements
+                pub fn get(self: @This(), index: usize) if (view_mode == .mutable) []T else []const T {
+                    std.debug.assert(index < self.len());
                     const start: usize = self.offsets[index];
                     const end: usize = self.offsets[index + 1];
                     return self.values[start..end];
@@ -258,10 +257,10 @@ test "RaggedSliceBlock encode() writes the child count, offsets, and elements wi
     try std.testing.expectEqualSlices(u8, &expected, buffer[0..written]);
     try std.testing.expectEqual(@as(u8, 99), buffer[written]);
     const view = try RaggedSliceBlock(u8).view(buffer[0..written]);
-    try std.testing.expectEqual(@intFromPtr(&buffer) + 16, @intFromPtr((try view.get(0)).ptr));
-    try std.testing.expectEqual(@intFromPtr(&buffer) + 18, @intFromPtr((try view.get(1)).ptr));
-    try std.testing.expectEqualSlices(u8, "ab", (try view.get(0)));
-    try std.testing.expectEqualSlices(u8, "c", (try view.get(1)));
+    try std.testing.expectEqual(@intFromPtr(&buffer) + 16, @intFromPtr(view.get(0).ptr));
+    try std.testing.expectEqual(@intFromPtr(&buffer) + 18, @intFromPtr(view.get(1).ptr));
+    try std.testing.expectEqualSlices(u8, "ab", view.get(0));
+    try std.testing.expectEqualSlices(u8, "c", view.get(1));
 }
 
 test "RaggedSliceBlock preserves byte slices of different lengths, including empty slices" {
@@ -275,8 +274,8 @@ test "RaggedSliceBlock preserves byte slices of different lengths, including emp
     const assumed_valid = try Block.viewAssumeValid(buffer[0..len]);
     try std.testing.expectEqual(@as(usize, values.len), view.len());
     for (&values, 0..) |expected, index| {
-        try std.testing.expectEqualSlices(u8, expected, (try view.get(index)));
-        try std.testing.expectEqualSlices(u8, expected, (try assumed_valid.get(index)));
+        try std.testing.expectEqualSlices(u8, expected, view.get(index));
+        try std.testing.expectEqualSlices(u8, expected, assumed_valid.get(index));
     }
 }
 
@@ -292,7 +291,7 @@ test "RaggedSliceBlock encode() aligns u64 elements and views reject nonzero pad
     try std.testing.expectEqual(children.len, view.len());
     try std.testing.expectEqual(@intFromPtr(&buffer) + 24, @intFromPtr(view.values.ptr));
     for (children, 0..) |expected, index| {
-        try std.testing.expectEqualSlices(u64, expected, try view.get(index));
+        try std.testing.expectEqualSlices(u64, expected, view.get(index));
     }
     for (20..24) |index| {
         buffer[index] = 1;
@@ -319,7 +318,7 @@ test "RaggedSliceBlock preserves the number of empty slices" {
     _ = try Block.encode(&buffer, &.{ "", "", "" });
     const view = try Block.view(&buffer);
     try std.testing.expectEqual(3, view.len());
-    for (0..view.len()) |index| try std.testing.expectEqual(0, (try view.get(index)).len);
+    for (0..view.len()) |index| try std.testing.expectEqual(0, view.get(index).len);
 }
 
 test "RaggedSliceBlock view() rejects offsets that do not describe all stored elements in order" {
@@ -415,18 +414,4 @@ test "layoutFromCounts() rejects child or element counts that exceed format or t
             layoutFromCounts(u64, 0, std.math.maxInt(usize)),
         );
     }
-}
-
-test "RaggedSliceBlock get() rejects an index at or beyond the number of slices" {
-    const Block = RaggedSliceBlock(u8);
-    var buffer: [32]u8 align(Block.alignment) = undefined;
-    const written = try Block.encode(&buffer, &.{ "a", "" });
-    const view = try Block.view(buffer[0..written]);
-    for ([_]usize{ view.len(), view.len() + 1, std.math.maxInt(usize) }) |index| {
-        try std.testing.expectError(error.IndexOutOfBounds, view.get(index));
-    }
-
-    const empty_written = try Block.encode(&buffer, &.{});
-    const empty_view = try Block.view(buffer[0..empty_written]);
-    try std.testing.expectError(error.IndexOutOfBounds, empty_view.get(0));
 }

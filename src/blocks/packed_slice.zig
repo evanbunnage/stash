@@ -40,8 +40,8 @@ pub fn PackedSlice(comptime T: type) type {
 
             /// Return the element by value. This is necessary for packed data because it can
             /// span byte boundaries, so getting values by reference isn't practical
-            pub fn get(self: @This(), index: usize) blocks.IndexError!T {
-                if (index >= self.count) return error.IndexOutOfBounds;
+            pub fn get(self: @This(), index: usize) T {
+                std.debug.assert(index < self.count);
                 return readElement(T, self.data, index);
             }
         };
@@ -55,14 +55,14 @@ pub fn PackedSlice(comptime T: type) type {
             }
 
             /// Return the element by value
-            pub fn get(self: @This(), index: usize) blocks.IndexError!T {
-                if (index >= self.count) return error.IndexOutOfBounds;
+            pub fn get(self: @This(), index: usize) T {
+                std.debug.assert(index < self.count);
                 return readElement(T, self.data, index);
             }
 
             /// Replace an element's bits in place
-            pub fn set(self: @This(), index: usize, value: T) blocks.IndexError!void {
-                if (index >= self.count) return error.IndexOutOfBounds;
+            pub fn set(self: @This(), index: usize, value: T) void {
+                std.debug.assert(index < self.count);
                 writeElement(T, self.data, index, value);
             }
         };
@@ -215,7 +215,7 @@ test "PackedSlice encode() writes the element count and packed bits in little-en
     try std.testing.expectEqual(expected.len, written);
     try std.testing.expectEqualSlices(u8, &expected, &buffer);
     const view = try PackedSlice(u3).view(&buffer);
-    for (values, 0..) |value, index| try std.testing.expectEqual(value, (try view.get(index)));
+    for (values, 0..) |value, index| try std.testing.expectEqual(value, view.get(index));
 }
 
 test "PackedSlice preserves values whose bits cross byte boundaries" {
@@ -240,7 +240,7 @@ test "PackedSlice preserves values whose bits cross byte boundaries" {
             const view = try Block.view(buffer[0..written]);
             try std.testing.expectEqual(count, view.len());
             for (values[0..count], 0..) |expected, index| {
-                try std.testing.expectEqual(expected, try view.get(index));
+                try std.testing.expectEqual(expected, view.get(index));
             }
         }
     }
@@ -263,7 +263,7 @@ test "PackedSlice view() rejects an undeclared enum tag" {
 test "PackedSlice views reject trailing bytes and nonzero unused bits" {
     const Block = PackedSlice(u3);
     var buffer = [_]u8{ 1, 0, 0, 0, 5, 0 };
-    try std.testing.expectEqual(@as(u3, 5), try (try Block.view(buffer[0..5])).get(0));
+    try std.testing.expectEqual(@as(u3, 5), (try Block.view(buffer[0..5])).get(0));
     try std.testing.expectError(error.InvalidFormat, Block.view(&buffer));
     try std.testing.expectError(error.InvalidFormat, Block.viewMutable(&buffer));
     try std.testing.expectError(error.InvalidFormat, Block.viewAssumeValid(&buffer));
@@ -297,7 +297,7 @@ test "PackedSlice stores booleans and fully declared enums without needing value
         const written = try Block.encode(&buffer, &input);
         const view = try Block.view(buffer[0..written]);
         for (input, 0..) |expected, index| {
-            try std.testing.expectEqual(expected, try view.get(index));
+            try std.testing.expectEqual(expected, view.get(index));
         }
     }
 }
@@ -342,7 +342,7 @@ test "PackedSlice accepts unaligned buffers and leaves surrounding bytes unchang
         try Block.view(buffer[1..][0..written]),
         try Block.viewAssumeValid(buffer[1..][0..written]),
     }) |view| {
-        try std.testing.expectEqual(@as(u3, 7), try view.get(2));
+        try std.testing.expectEqual(@as(u3, 7), view.get(2));
     }
     try std.testing.expectEqualSlices(u8, &.{ 99, 3, 0, 0, 0, 0xd1, 1, 99 }, &buffer);
 }
@@ -356,7 +356,7 @@ test "PackedSlice preserves signed integers and signed enum tags" {
         const view = try PackedSlice(T).view(&buffer);
         for (input, 0..) |expected, index| try std.testing.expectEqual(
             expected,
-            (try view.get(index)),
+            view.get(index),
         );
     }
 }
@@ -367,7 +367,7 @@ test "PackedSlice accepts undeclared tags in non-exhaustive enums" {
     _ = try PackedSlice(NonExhaustiveStatus).encode(&buffer, &.{@enumFromInt(7)});
     try std.testing.expectEqual(
         @as(u3, 7),
-        @intFromEnum(try (try PackedSlice(NonExhaustiveStatus).view(&buffer)).get(0)),
+        @intFromEnum((try PackedSlice(NonExhaustiveStatus).view(&buffer)).get(0)),
     );
 }
 
@@ -382,7 +382,7 @@ test "PackedSlice view() checks nested enum fields beyond bit 64 in later elemen
     var buffer: [21]u8 = undefined;
     _ = try PackedSlice(Record).encode(&buffer, &input);
     const view = try PackedSlice(Record).view(&buffer);
-    for (input, 0..) |expected, index| try std.testing.expectEqual(expected, (try view.get(index)));
+    for (input, 0..) |expected, index| try std.testing.expectEqual(expected, view.get(index));
     // The second record starts at bit 67, and its enum starts another 65 bits later
     std.mem.writePackedInt(u2, buffer[4..], 67 + 65, 1, .little);
     try std.testing.expectError(error.InvalidValue, PackedSlice(Record).view(&buffer));
@@ -409,20 +409,6 @@ test "packedByteCount() rejects counts above u32 and bit counts that overflow us
     }
 }
 
-test "PackedSlice get() rejects an index at or beyond the element count" {
-    const Block = PackedSlice(u3);
-    var buffer: [32]u8 align(Block.alignment) = undefined;
-    const written = try Block.encode(&buffer, &.{ 1, 2 });
-    const view = try Block.view(buffer[0..written]);
-    for ([_]usize{ view.len(), view.len() + 1, std.math.maxInt(usize) }) |index| {
-        try std.testing.expectError(error.IndexOutOfBounds, view.get(index));
-    }
-
-    const empty_written = try Block.encode(&buffer, &.{});
-    const empty_view = try Block.view(buffer[0..empty_written]);
-    try std.testing.expectError(error.IndexOutOfBounds, empty_view.get(0));
-}
-
 test "PackedSlice set() replaces bits as expected" {
     inline for (.{ u3, u9, u65 }) |T| {
         const Block = PackedSlice(T);
@@ -435,8 +421,8 @@ test "PackedSlice set() replaces bits as expected" {
             for ([_]T{ 0, 1, std.math.maxInt(T) }) |replacement| {
                 {
                     const view = try Block.viewMutable(buffer[0..written]);
-                    try view.set(index, replacement);
-                    try std.testing.expectEqual(replacement, try view.get(index));
+                    view.set(index, replacement);
+                    try std.testing.expectEqual(replacement, view.get(index));
                 }
                 expected[index] = replacement;
                 _ = try Block.encode(&reference, &expected);
@@ -444,17 +430,5 @@ test "PackedSlice set() replaces bits as expected" {
                 _ = try Block.view(buffer[0..written]);
             }
         }
-        const before = buffer;
-        const view = try Block.viewMutable(buffer[0..written]);
-        for ([_]usize{ view.len(), std.math.maxInt(usize) }) |index| {
-            try std.testing.expectError(error.IndexOutOfBounds, view.set(index, 0));
-        }
-        try std.testing.expectEqualSlices(u8, before[0..written], buffer[0..written]);
     }
-
-    const Block = PackedSlice(u3);
-    var empty: [4]u8 align(Block.alignment) = undefined;
-    _ = try Block.encode(&empty, &.{});
-    const view = try Block.viewMutable(&empty);
-    try std.testing.expectError(error.IndexOutOfBounds, view.set(0, 1));
 }

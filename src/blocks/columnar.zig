@@ -69,7 +69,6 @@ pub fn Columns(comptime Row: type, comptime options: ColumnOptions(Row)) type {
 
         pub const View = ViewType(.read_only);
         pub const MutableView = ViewType(.mutable);
-        pub const RowIterator = View.Iterator;
 
         fn ViewType(comptime view_mode: ViewMode) type {
             return struct {
@@ -95,8 +94,8 @@ pub fn Columns(comptime Row: type, comptime options: ColumnOptions(Row)) type {
                     self: @This(),
                     comptime field: Field,
                     index: usize,
-                ) blocks.IndexError!columns[@intFromEnum(field)].type {
-                    if (index >= self.row_count) return error.IndexOutOfBounds;
+                ) columns[@intFromEnum(field)].type {
+                    std.debug.assert(index < self.row_count);
                     const column_view = self.column(field);
                     return switch (columns[@intFromEnum(field)].kind) {
                         .fixed => column_view[index],
@@ -105,32 +104,16 @@ pub fn Columns(comptime Row: type, comptime options: ColumnOptions(Row)) type {
                 }
 
                 /// Return the row at index i by collecting its fields from the respective columns
-                /// Think of this as row-level access in columnar data, not super efficient but possible
-                pub fn get(self: @This(), index: usize) blocks.IndexError!Row {
-                    if (index >= self.row_count) return error.IndexOutOfBounds;
+                /// Think of this as row-level access in columnar data, not super efficient but possible.
+                /// The row is a copy, so edit stored values through column()
+                pub fn get(self: @This(), index: usize) Row {
+                    std.debug.assert(index < self.row_count);
                     var row: Row = undefined;
                     inline for (row_fields) |field| {
-                        @field(row, field.name) = try self.value(@field(Field, field.name), index);
+                        @field(row, field.name) = self.value(@field(Field, field.name), index);
                     }
                     return row;
                 }
-
-                /// Read the stored rows in order
-                pub fn iterator(self: @This()) Iterator {
-                    return .{ .view = self };
-                }
-
-                const Iterator = struct {
-                    view: ViewType(view_mode),
-                    index: usize = 0,
-
-                    /// Return the next row, or null when there are no rows left
-                    pub fn next(self: *@This()) ?Row {
-                        if (self.index >= self.view.len()) return null;
-                        defer self.index += 1;
-                        return self.view.get(self.index) catch unreachable;
-                    }
-                };
             };
         }
 
@@ -505,9 +488,9 @@ test "Columns writes fixed-size, ragged, and packed columns in the expected byte
     try std.testing.expectEqual(expected.len, written);
     try std.testing.expectEqualSlices(u8, &expected, &buffer);
     const view = try Block.view(&buffer);
-    try std.testing.expectEqual(@as(u16, 2), try view.value(.id, 1));
-    try std.testing.expectEqualSlices(u8, "bc", try view.value(.name, 1));
-    try std.testing.expectEqual(@as(u2, 2), try view.value(.code, 1));
+    try std.testing.expectEqual(@as(u16, 2), view.value(.id, 1));
+    try std.testing.expectEqualSlices(u8, "bc", view.value(.name, 1));
+    try std.testing.expectEqual(@as(u2, 2), view.value(.code, 1));
 }
 
 test "Columns view() and viewAssumeValid() return columns pointing into the buffer" {
@@ -533,8 +516,8 @@ test "Columns view() and viewAssumeValid() return columns pointing into the buff
         try std.testing.expectEqual(rows.len, view.len());
         try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, view.column(.id));
         try std.testing.expectEqual(id_address, @intFromPtr(view.column(.id).ptr));
-        try std.testing.expectEqual(name_address, @intFromPtr((try view.value(.name, 0)).ptr));
-        try std.testing.expectEqualStrings("two", try view.value(.name, 1));
+        try std.testing.expectEqual(name_address, @intFromPtr(view.value(.name, 0).ptr));
+        try std.testing.expectEqualStrings("two", view.value(.name, 1));
     }
 }
 
@@ -561,11 +544,11 @@ test "Columns stores packed enum values alongside ordinary integer values" {
 
     const view = try Block.view(buffer[0..written]);
     try std.testing.expectEqual(@as(usize, 3), view.len());
-    try std.testing.expectEqual(Status.failed, try view.value(.status, 1));
-    try std.testing.expectEqual(@as(u32, 300), try view.value(.len, 2));
+    try std.testing.expectEqual(Status.failed, view.value(.status, 1));
+    try std.testing.expectEqual(@as(u32, 300), view.value(.len, 2));
 
     // The packed column returns values through get(). The u32 column is a regular slice
-    try std.testing.expectEqual(Status.failed, try view.column(.status).get(1));
+    try std.testing.expectEqual(Status.failed, view.column(.status).get(1));
     try std.testing.expectEqual(@as(u32, 300), view.column(.len)[2]);
 }
 
@@ -608,7 +591,7 @@ test "Columns reads zero-sized rows without validating each empty array" {
     };
     const view = try Block.view(&buffer);
     try std.testing.expectEqual(@as(usize, std.math.maxInt(u32)), view.len());
-    try std.testing.expectEqualDeep(Row{ .empty = .{} }, try view.get(view.len() - 1));
+    try std.testing.expectEqualDeep(Row{ .empty = .{} }, view.get(view.len() - 1));
 }
 
 test "Columns view() rejects an undeclared enum tag in a packed column" {
@@ -712,6 +695,31 @@ test "Columns view() rejects overlapping columns" {
     try std.testing.expectError(error.InvalidFormat, Block.viewAssumeValid(buffer[0..end]));
 }
 
+test "Columns views reject a header whose field count does not match the row type" {
+    const Row = struct { key: u64, flag: u8 };
+    const Block = Columns(Row, .{});
+    var buffer: [128]u8 align(Block.alignment) = undefined;
+    const written = try Block.encode(&buffer, &.{.{ .key = 1, .flag = 2 }});
+
+    bytes.writeValue(u32, buffer[@offsetOf(ColumnarHeader, "field_count")..][0..@sizeOf(u32)], 3);
+    try std.testing.expectError(error.InvalidFormat, Block.view(buffer[0..written]));
+    try std.testing.expectError(error.InvalidFormat, Block.viewAssumeValid(buffer[0..written]));
+    try std.testing.expectError(error.InvalidFormat, Block.viewMutable(buffer[0..written]));
+}
+
+test "Columns views reject a slice column whose child count does not match the row count" {
+    const Row = struct { name: []const u8 };
+    const Block = Columns(Row, .{});
+    var buffer: [64]u8 align(Block.alignment) = undefined;
+    const written = try Block.encode(&buffer, &.{.{ .name = "a" }});
+
+    // Two rows would need two child slices, but the column only stores one
+    bytes.writeValue(u32, buffer[@offsetOf(ColumnarHeader, "row_count")..][0..@sizeOf(u32)], 2);
+    try std.testing.expectError(error.InvalidFormat, Block.view(buffer[0..written]));
+    try std.testing.expectError(error.InvalidFormat, Block.viewAssumeValid(buffer[0..written]));
+    try std.testing.expectError(error.InvalidFormat, Block.viewMutable(buffer[0..written]));
+}
+
 test "Columns view() rejects trailing bytes past the last column" {
     const Row = struct { key: u64 };
     const Block = Columns(Row, .{});
@@ -732,7 +740,7 @@ test "Columns view() rejects trailing bytes past the last column" {
     );
 }
 
-test "Columns get() and iterator() reconstruct rows from their stored columns" {
+test "Columns get() reconstructs rows from their stored columns" {
     const Status = enum(u3) { pending, complete, failed };
     const Row = struct {
         name: []const u8,
@@ -750,43 +758,18 @@ test "Columns get() and iterator() reconstruct rows from their stored columns" {
     const written = try Block.encode(&buffer, &rows);
     const view = try Block.view(buffer[0..written]);
 
-    const second = try view.get(1);
+    const second = view.get(1);
     try std.testing.expectEqualSlices(u8, "three", second.name);
     try std.testing.expectEqual(@as(u32, 3), second.length);
     try std.testing.expectEqual(Status.failed, second.status);
 
-    var it = view.iterator();
-    var count: usize = 0;
-    while (it.next()) |row| : (count += 1) {
-        try std.testing.expectEqualSlices(u8, rows[count].name, row.name);
-        try std.testing.expectEqual(rows[count].length, row.length);
-        try std.testing.expectEqual(rows[count].status, row.status);
+    try std.testing.expectEqual(rows.len, view.len());
+    for (rows, 0..) |expected, index| {
+        const row = view.get(index);
+        try std.testing.expectEqualSlices(u8, expected.name, row.name);
+        try std.testing.expectEqual(expected.length, row.length);
+        try std.testing.expectEqual(expected.status, row.status);
     }
-    try std.testing.expectEqual(rows.len, count);
-    try std.testing.expectEqual(null, it.next());
-}
-
-test "Columns get() and value() reject an index at or beyond the row count" {
-    const Row = struct { id: u16, name: []const u8, code: u2 };
-    const Block = Columns(Row, .{ .packed_fields = &.{.code} });
-    const rows = [_]Row{.{ .id = 1, .name = "a", .code = 2 }};
-    var buffer: [128]u8 align(Block.alignment) = undefined;
-    const written = try Block.encode(&buffer, &rows);
-    const view = try Block.view(buffer[0..written]);
-    for ([_]usize{ view.len(), view.len() + 1, std.math.maxInt(usize) }) |index| {
-        try std.testing.expectError(error.IndexOutOfBounds, view.get(index));
-        inline for (.{ .id, .name, .code }) |field| {
-            try std.testing.expectError(error.IndexOutOfBounds, view.value(field, index));
-        }
-    }
-    const empty_written = try Block.encode(&buffer, &.{});
-    const empty_view = try Block.view(buffer[0..empty_written]);
-    try std.testing.expectError(error.IndexOutOfBounds, empty_view.get(0));
-    inline for (.{ .id, .name, .code }) |field| {
-        try std.testing.expectError(error.IndexOutOfBounds, empty_view.value(field, 0));
-    }
-    var empty_iterator = empty_view.iterator();
-    try std.testing.expectEqual(null, empty_iterator.next());
 }
 
 test "Columns encode() leaves an undersized or misaligned destination buffer unchanged" {
