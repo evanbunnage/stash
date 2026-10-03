@@ -20,9 +20,6 @@ pub const WriteError = layout.WriteError;
 /// from one valid value to another. Use a separate checksum when you need integrity checks
 pub const ViewError = layout.ViewError;
 
-/// IndexOutOfBounds means the requested element or row index is at or beyond len()
-pub const IndexError = blocks.IndexError;
-
 /// Check at comptime that a type can be stored directly, including its nested fields.
 /// Stored types cannot contain pointers or implicit padding. Stash's Layout logic performs these checks
 /// automatically, but assertStorable() can also check types not used with Layout
@@ -98,6 +95,7 @@ test {
     _ = comptime_validation;
     _ = blocks;
     _ = layout;
+    _ = @import("reports.zig");
     _ = @import("bytes.zig");
     _ = @import("runtime_validation.zig");
     _ = @import("blocks/value.zig");

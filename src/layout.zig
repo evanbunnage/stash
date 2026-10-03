@@ -26,10 +26,8 @@ const builtin = @import("builtin");
 
 const bytes = @import("bytes.zig");
 const blocks = @import("blocks.zig");
+const reports = @import("reports.zig");
 const packed_slice = @import("blocks/packed_slice.zig");
-const SliceBlock = @import("blocks/slice.zig").SliceBlock;
-const ValueBlock = @import("blocks/value.zig").ValueBlock;
-const RaggedSliceBlock = @import("blocks/ragged_slice.zig").RaggedSliceBlock;
 const Columns = @import("blocks/columnar.zig").Columns;
 
 /// Counts, byte sizes, and aligned positions must fit the layout's representation
@@ -111,215 +109,24 @@ pub fn Layout(comptime Schema: type) type {
 
         const BlockSizes = [layout_fields.len]usize;
 
-        /// Print the format to stderr, ignoring output errors like std.debug.print()
-        pub fn printSchema() void {
-            var buffer: [1024]u8 = undefined;
-            const stderr = std.debug.lockStderr(&buffer);
-            defer std.debug.unlockStderr();
-            describe(&stderr.file_writer.interface) catch {};
+        /// Return a report of the format's alignment and each field's storage and input type.
+        /// Print with {f}: std.debug.print("{f}\n", .{Format.describe()})
+        pub fn describe() reports.SchemaReport(Schema, alignment) {
+            return .{};
         }
 
-        /// Validate the buffer and print its layout to stderr.
-        /// Return validation errors, but ignore output errors like std.debug.print()
-        pub fn printBufferLayout(payload: []const u8) ViewError!void {
-            var buffer: [1024]u8 = undefined;
-            const stderr = std.debug.lockStderr(&buffer);
-            defer std.debug.unlockStderr();
-            inspect(payload, &stderr.file_writer.interface) catch |err| switch (err) {
-                error.WriteFailed => {},
-                else => |validation_error| return validation_error,
-            };
-        }
-
-        /// Print the format's alignment and each field's storage and input type.
-        /// No buffer is needed. The caller owns and flushes the writer
-        pub fn describe(writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            const type_width = comptime blk: {
-                var longest: usize = "Type".len;
-                for (layout_fields) |field| {
-                    const Block = blocks.resolveBlockType(field.type);
-                    longest = @max(longest, reportTypeName(Block.Input).len);
-                }
-                break :blk longest;
-            };
-            const widths = .{ reportFieldWidth(), 22, type_width };
-            try writeReportBorder(writer, &widths);
-            try writeReportLabel(writer, "Field");
-            try writer.print(" {s:<22} | ", .{"Stored as"});
-            try writer.writeAll("Type");
-            try writer.splatByteAll(' ', type_width - "Type".len);
-            try writer.writeAll(" |\n");
-            try writeReportBorder(writer, &widths);
-            inline for (layout_fields) |field| {
-                const Block = blocks.resolveBlockType(field.type);
-                const storage: []const u8 = switch (Block.stash_block_info.kind) {
-                    .value => "Single value",
-                    .slice => "Contiguous slice",
-                    .ragged_slice => "Variable-length slices",
-                    .packed_slice => "Bit-packed slice",
-                    .columnar => "Columns",
-                    else => unreachable,
-                };
-                try writeReportLabel(writer, field.name);
-                const type_name = comptime reportTypeName(Block.Input);
-                try writer.print(" {s:<22} | {s}", .{ storage, type_name });
-                try writer.splatByteAll(' ', type_width - type_name.len);
-                try writer.writeAll(" |\n");
-            }
-            try writeReportBorder(writer, &widths);
-            try writer.print("Alignment: {d}\n", .{alignment});
-        }
-
-        /// Validate a complete encoded buffer, then print each field's byte offset and size,
+        /// Validate a complete encoded buffer, then return a report of each field's byte offset and size,
         /// alignment gaps, and the trailing size table, separating value bytes from stash overhead.
-        /// Explicit padding in stored types counts as value bytes. Packed values use whole bytes
-        /// Stored values are not printed. The caller owns and flushes the writer
-        pub fn inspect(payload: []const u8, writer: *std.Io.Writer) (ViewError || std.Io.Writer.Error)!void {
-            // Use the same validation as view() before printing anything about the buffer
-            const views = try view(payload);
-            const ranges = try readBlockByteRanges(payload);
-            const table_offset = try findBlockSizeTableOffset(payload);
-
-            // Counts normally fit within the buffer size, but zero-sized arrays and columns can exceed it
-            var largest_count = payload.len;
-            inline for (layout_fields) |field| {
-                const Block = blocks.resolveBlockType(field.type);
-                largest_count = @max(largest_count, storedEntryCount(Block, @field(views, field.name)) orelse 0);
-            }
-            const region_width = reportFieldWidth() + 5 + std.fmt.count("{d}", .{largest_count});
-            const widths = .{ region_width, 12, 12 };
-            try writeReportBorder(writer, &widths);
-            try writer.writeAll("| Region");
-            try writer.splatByteAll(' ', region_width - "Region".len);
-            try writer.print(" | {s:>12} | {s:>12} |\n", .{ "Offset", "Size" });
-            try writeReportBorder(writer, &widths);
-            var cursor: usize = 0;
-            var value_bytes: usize = 0;
-            var metadata_bytes: usize = sizeTableByteCount();
-            inline for (layout_fields, ranges) |field, range| {
-                if (range.offset > cursor) {
-                    try writeReportRange(writer, region_width, "  [padding]", cursor, range.offset - cursor, null);
-                }
-                const Block = blocks.resolveBlockType(field.type);
-                const field_value_bytes = storedValueByteCount(Block, @field(views, field.name));
-                value_bytes += field_value_bytes;
-                metadata_bytes += blockMetadataByteCount(Block, @field(views, field.name));
-                try writeBlockRegions(Block, writer, region_width, payload[range.offset..][0..range.size], range.offset, field.name, @field(views, field.name));
-                cursor = range.offset + range.size;
-            }
-            if (table_offset > cursor) {
-                try writeReportRange(writer, region_width, "  [padding]", cursor, table_offset - cursor, null);
-            }
-            try writeReportRange(writer, region_width, "  [footer]", table_offset, sizeTableByteCount(), null);
-            try writeReportBorder(writer, &widths);
-            try writer.print("\nYour data:        {d:>6} bytes\nStash metadata:   {d:>6} bytes\nStash padding:    {d:>6} bytes\n------------------------------\nTotal:            {d:>6} bytes\n\nAlignment: {d}\n", .{
-                value_bytes, metadata_bytes, payload.len - value_bytes - metadata_bytes, payload.len, alignment,
-            });
-        }
-
-        // Leave room for both schema field names and the metadata rows
-        fn reportFieldWidth() usize {
-            comptime var longest: usize = 18;
-            inline for (layout_fields) |field| {
-                longest = @max(longest, field.name.len);
-                const Block = blocks.resolveBlockType(field.type);
-                if (Block.stash_block_info.kind == .packed_slice or Block.stash_block_info.kind == .ragged_slice or Block.stash_block_info.kind == .columnar) {
-                    longest = @max(longest, 4 + field.name.len + " offsets".len);
-                }
-                if (Block.stash_block_info.kind == .columnar) {
-                    longest = @max(longest, 4 + field.name.len + " column directory".len);
-                    inline for (std.meta.fields(Block.stash_block_info.Element)) |column| {
-                        longest = @max(longest, field.name.len + 1 + column.name.len);
-                        if (@typeInfo(column.type) == .pointer) {
-                            longest = @max(longest, 4 + field.name.len + 1 + column.name.len + " offsets".len);
-                        }
-                    }
-                }
-            }
-            return longest + 2;
-        }
-
-        fn writeReportBorder(writer: *std.Io.Writer, widths: []const usize) std.Io.Writer.Error!void {
-            try writer.writeByte('+');
-            for (widths) |width| {
-                try writer.splatByteAll('-', width + 2);
-                try writer.writeByte('+');
-            }
-            try writer.writeByte('\n');
-        }
-
-        fn writeReportLabel(writer: *std.Io.Writer, label: []const u8) std.Io.Writer.Error!void {
-            try writer.print("| {s}", .{label});
-            try writer.splatByteAll(' ', reportFieldWidth() - label.len);
-            try writer.writeAll(" |");
-        }
-
-        fn writeReportRange(writer: *std.Io.Writer, width: usize, label: []const u8, offset: usize, size: usize, count: ?usize) std.Io.Writer.Error!void {
-            try writer.print("| {s}", .{label});
-            var label_size = label.len;
-            if (count) |entries| {
-                try writer.print(" (n={d})", .{entries});
-                label_size += std.fmt.count(" (n={d})", .{entries});
-            }
-            try writer.splatByteAll(' ', width - label_size);
-            try writer.print(" | {d:>12} | {d:>12} |\n", .{ offset, size });
-        }
-
-        // Print each byte range once, using absolute offsets within the validated buffer.
-        // Metadata is indented, while stored fields retain their schema names
-        fn writeBlockRegions(
-            comptime Block: type,
-            writer: *std.Io.Writer,
-            width: usize,
-            buffer: []const u8,
-            offset: usize,
-            comptime name: []const u8,
-            block_view: Block.View,
-        ) std.Io.Writer.Error!void {
-            const info = Block.stash_block_info;
-            switch (info.kind) {
-                .packed_slice => {
-                    const data_offset = @intFromPtr(block_view.data.ptr) - @intFromPtr(buffer.ptr);
-                    try writeReportRange(writer, width, "  [`" ++ name ++ "` counts]", offset, data_offset, null);
-                    try writeReportRange(writer, width, name, offset + data_offset, block_view.data.len, block_view.len());
-                },
-                .ragged_slice => {
-                    const offsets_size = std.mem.sliceAsBytes(block_view.offsets).len;
-                    const values_offset = @intFromPtr(block_view.values.ptr) - @intFromPtr(buffer.ptr);
-                    const metadata_end = @sizeOf(u32) + offsets_size;
-                    try writeReportRange(writer, width, "  [`" ++ name ++ "` counts]", offset, @sizeOf(u32), null);
-                    try writeReportRange(writer, width, "  [`" ++ name ++ "` offsets]", offset + @sizeOf(u32), offsets_size, null);
-                    if (values_offset > metadata_end) {
-                        try writeReportRange(writer, width, "  [padding]", offset + metadata_end, values_offset - metadata_end, null);
-                    }
-                    try writeReportRange(writer, width, name, offset + values_offset, std.mem.sliceAsBytes(block_view.values).len, block_view.len());
-                },
-                .columnar => {
-                    // Columnar storage begins with two u32 counts and an offset/size pair per column
-                    const fields = std.meta.fields(info.Element);
-                    const counts_size = 2 * @sizeOf(u32);
-                    const Entry = extern struct { offset: u32, size: u32 };
-                    const table_size = fields.len * @sizeOf(Entry);
-                    try writeReportRange(writer, width, "  [`" ++ name ++ "` counts]", offset, counts_size, null);
-                    try writeReportRange(writer, width, "  [`" ++ name ++ "` column directory]", offset + counts_size, table_size, null);
-                    var cursor = counts_size + table_size;
-                    inline for (fields, 0..) |field, index| {
-                        const entry = bytes.copyValue(Entry, buffer[counts_size + index * @sizeOf(Entry) ..]) catch unreachable;
-                        if (entry.offset > cursor) {
-                            try writeReportRange(writer, width, "  [padding]", offset + cursor, entry.offset - cursor, null);
-                        }
-                        const field_id = @field(Block.Field, field.name);
-                        if (comptime std.mem.indexOfScalar(Block.Field, info.options.packed_fields, field_id) == null and @typeInfo(field.type) == .pointer) {
-                            const ChildBlock = RaggedSliceBlock(@typeInfo(field.type).pointer.child);
-                            try writeBlockRegions(ChildBlock, writer, width, buffer[entry.offset..][0..entry.size], offset + entry.offset, name ++ "." ++ field.name, block_view.column(field_id));
-                        } else {
-                            try writeReportRange(writer, width, name ++ "." ++ field.name, offset + entry.offset, entry.size, block_view.len());
-                        }
-                        cursor = @as(usize, entry.offset) + entry.size;
-                    }
-                },
-                else => try writeReportRange(writer, width, name, offset, buffer.len, storedEntryCount(Block, block_view)),
-            }
+        /// Explicit padding in stored types counts as value bytes. Packed values use whole bytes.
+        /// Print it with {f}: std.debug.print("{f}\n", .{try Format.inspect(buffer)}).
+        pub fn inspect(payload: []const u8) ViewError!reports.BufferReport(Schema, alignment, View, BlockByteRanges) {
+            // Use the same validation as view() before reporting anything about the buffer
+            return .{
+                .payload = payload,
+                .views = try view(payload),
+                .ranges = try readBlockByteRanges(payload),
+                .table_offset = try findBlockSizeTableOffset(payload),
+            };
         }
 
         /// Return the buffer size needed to write the input, including padding and the block size table
@@ -415,38 +222,6 @@ pub fn Layout(comptime Schema: type) type {
                 sizes[index] = try Block.initializedSize(@field(initial_values, field.name));
             }
             return sizes;
-        }
-
-        /// Callers supply a byte size for every variable-size field, using its schema name.
-        /// Fixed-size fields are omitted because their blocks already determine their sizes.
-        pub const VariableBlockSizes = blk: {
-            var fields: [layout_fields.len]std.builtin.Type.StructField = undefined;
-            var count: usize = 0;
-            for (layout_fields) |field| {
-                const Block = blocks.resolveBlockType(field.type);
-                if (encodedSizeWithoutInput(Block) == null) {
-                    fields[count] = field;
-                    count += 1;
-                }
-            }
-            break :blk MappedStruct(fields[0..count], false, struct {
-                fn map(comptime _: std.builtin.Type.StructField) type {
-                    return usize;
-                }
-            }.map);
-        };
-
-        /// Calculate the required buffer size from known variable-size block sizes, including all layout overhead
-        pub fn encodedSizeFromBlockSizes(sizes: VariableBlockSizes) BufferSizeError!usize {
-            var all_sizes: BlockSizes = undefined;
-            inline for (layout_fields, 0..) |field, index| {
-                const Block = blocks.resolveBlockType(field.type);
-                all_sizes[index] = if (comptime encodedSizeWithoutInput(Block)) |size|
-                    size
-                else
-                    @field(sizes, field.name);
-            }
-            return totalEncodedSize(all_sizes);
         }
 
         // Include alignment padding and the size table in the total size
@@ -571,8 +346,24 @@ pub fn Layout(comptime Schema: type) type {
             return buffer;
         }
 
-        /// Validate the buffer's structure and stored values, then return read-only views of its fields.
-        /// The buffer must remain valid and immutable while any returned view or derived pointer or slice is in use
+        /// This is the main zero-copy access point for a stash layout.
+        ///
+        /// view() validates the buffer's structure and  stored enums/bools, then returns
+        /// typed read-only views of the layout's fields.
+        ///
+        /// The buffer must remain valid and immutable while any returned view or derived pointer or slice is in use.
+        /// It must be aligned to Format.alignment, otherwise this function returns MisalignedBuffer.
+        ///
+        /// We could enforce alignment at the type-level, but we still accept []const u8 of any
+        /// alignment for this function so buffers at offsets only known at runtime don't need an @alignCast
+        /// which can panic or cause UB depending on the build mode.
+        ///
+        /// Best practice with stash is to allocate buffers with Format.alignment. If you're storing
+        /// stash data in a larger buffer, then just make sure its offset is aligned to Format.alignment as well.
+        /// That way you can treat MisalignedBuffer errors as data corruption and handle appropriately
+        /// for your application.
+        ///
+        /// See more about runtime validation, alginment, etc in docs/
         pub fn view(payload: []const u8) ViewError!View {
             return viewImpl(payload, true);
         }
@@ -687,85 +478,7 @@ pub fn Layout(comptime Schema: type) type {
     };
 }
 
-// Preserve slice and array syntax while omitting module names from named element types
-fn reportTypeName(comptime T: type) []const u8 {
-    return switch (@typeInfo(T)) {
-        .pointer => |pointer| "[]" ++ (if (pointer.is_const) "const " else "") ++ reportTypeName(pointer.child),
-        .array => |array| std.fmt.comptimePrint("[{d}]{s}", .{ array.len, reportTypeName(array.child) }),
-        .@"struct", .@"enum" => blk: {
-            const name = @typeName(T);
-            const start = if (std.mem.lastIndexOfScalar(u8, name, '.')) |index| index + 1 else 0;
-            break :blk name[start..];
-        },
-        else => @typeName(T),
-    };
-}
-
-// A ragged field counts child slices, and a columnar field counts rows
-fn storedEntryCount(comptime Block: type, block_view: Block.View) ?usize {
-    return switch (Block.stash_block_info.kind) {
-        .value => switch (@typeInfo(Block.stash_block_info.Element)) {
-            .array => |array| array.len,
-            else => null,
-        },
-        .slice => block_view.len,
-        .ragged_slice, .packed_slice, .columnar => block_view.len(),
-        else => unreachable,
-    };
-}
-
-// Count only the bytes occupied by values in an already validated view.
-// The remaining bytes belong to stash metadata and alignment, including inside columnar blocks
-// Count headers and offset tables separately from padding and stored values
-fn blockMetadataByteCount(comptime Block: type, block_view: Block.View) usize {
-    const info = Block.stash_block_info;
-    return switch (info.kind) {
-        .value, .slice => 0,
-        .packed_slice => @sizeOf(u32),
-        .ragged_slice => @sizeOf(u32) + std.mem.sliceAsBytes(block_view.offsets).len,
-        .columnar => count: {
-            const fields = std.meta.fields(info.Element);
-            var total: usize = 2 * @sizeOf(u32) + fields.len * 2 * @sizeOf(u32);
-            inline for (fields) |field| {
-                const field_id = @field(Block.Field, field.name);
-                if (comptime @typeInfo(field.type) == .pointer and std.mem.indexOfScalar(Block.Field, info.options.packed_fields, field_id) == null) {
-                    const column = block_view.column(field_id);
-                    total += @sizeOf(u32) + std.mem.sliceAsBytes(column.offsets).len;
-                }
-            }
-            break :count total;
-        },
-        else => unreachable,
-    };
-}
-
-fn storedValueByteCount(comptime Block: type, block_view: Block.View) usize {
-    const info = Block.stash_block_info;
-    return switch (info.kind) {
-        .value => @sizeOf(info.Element),
-        .slice => std.mem.sliceAsBytes(block_view).len,
-        .ragged_slice => std.mem.sliceAsBytes(block_view.values).len,
-        .packed_slice => block_view.data.len,
-        .columnar => count: {
-            var total: usize = 0;
-            inline for (std.meta.fields(info.Element)) |field| {
-                const field_id = @field(Block.Field, field.name);
-                const column = block_view.column(field_id);
-                if (comptime std.mem.indexOfScalar(Block.Field, info.options.packed_fields, field_id) != null) {
-                    total += column.data.len;
-                } else if (comptime @typeInfo(field.type) == .pointer) {
-                    total += std.mem.sliceAsBytes(column.values).len;
-                } else {
-                    total += std.mem.sliceAsBytes(column).len;
-                }
-            }
-            break :count total;
-        },
-        else => unreachable,
-    };
-}
-
-// Sizer and encodedSizeFromBlockSizes() must include value fields without receiving their values.
+// Sizer must include value fields without receiving their values.
 // Value blocks always occupy @sizeOf(T) bytes
 fn encodedSizeWithoutInput(comptime Block: type) ?usize {
     const block_info = Block.stash_block_info;
@@ -933,19 +646,19 @@ test "Layout sizing rejects overflow when adding blocks, alignment padding, or t
         });
         const max = std.math.maxInt(usize);
 
-        // These sizes overflow when aligning the second block, adding its bytes,
+        // These block sizes overflow when aligning the second block, adding its bytes,
         // or adding the size table. We can check each case without allocating the data
         try std.testing.expectError(
             error.InputTooLarge,
-            Format.encodedSizeFromBlockSizes(.{ .first = max, .second = 0 }),
+            Format.totalEncodedSize(.{ max, 0 }),
         );
         try std.testing.expectError(
             error.InputTooLarge,
-            Format.encodedSizeFromBlockSizes(.{ .first = max - 7, .second = 8 }),
+            Format.totalEncodedSize(.{ max - 7, 8 }),
         );
         try std.testing.expectError(
             error.InputTooLarge,
-            Format.encodedSizeFromBlockSizes(.{ .first = 0, .second = max - 7 }),
+            Format.totalEncodedSize(.{ 0, max - 7 }),
         );
     }
 }
@@ -1128,7 +841,7 @@ test "Layout sizing accepts a 4 GiB block when it fits the target address space"
             const block_size = @as(usize, std.math.maxInt(u32)) + 1;
             try std.testing.expectEqual(
                 block_size + 8,
-                try Format.encodedSizeFromBlockSizes(.{ .values = block_size }),
+                try Format.totalEncodedSize(.{block_size}),
             );
             try std.testing.expectEqual(block_size + 8, try Format.initializedSize(.{
                 .values = .{ .count = block_size / @sizeOf(u64), .value = 0 },
@@ -1136,7 +849,7 @@ test "Layout sizing accepts a 4 GiB block when it fits the target address space"
         } else {
             try std.testing.expectError(
                 error.InputTooLarge,
-                Format.encodedSizeFromBlockSizes(.{ .values = std.math.maxInt(usize) }),
+                Format.totalEncodedSize(.{std.math.maxInt(usize)}),
             );
         }
     }
@@ -1171,50 +884,11 @@ test "Layout initialize() leaves the buffer unchanged when a slice size overflow
     try std.testing.expect(std.mem.allEqual(u8, &buffer, 99));
 }
 
-test "Layout encodedSizeFromBlockSizes() needs sizes only for fields whose size depends on the input" {
-    const RowColumns = Columns(struct { id: u32, name: []const u8 }, .{});
-    const Format = Layout(struct {
-        header: ValueBlock(u64),
-        empty: extern struct {},
-        values: []const u16,
-        names: []const []const u8,
-        flags: packed_slice.PackedSlice(u3),
-        rows: RowColumns,
-    });
-    const input: Format.Input = .{
-        .header = 7,
-        .empty = .{},
-        .values = &.{ 1, 2 },
-        .names = &.{ "cat", "", "hello" },
-        .flags = &.{ 1, 2, 3 },
-        .rows = &.{.{ .id = 1, .name = "one" }},
-    };
-    const size_fields = @typeInfo(Format.VariableBlockSizes).@"struct".fields;
-    try std.testing.expectEqual(4, size_fields.len);
-    inline for (size_fields, .{ "values", "names", "flags", "rows" }) |field, name| {
-        try std.testing.expectEqualStrings(name, field.name);
-        try std.testing.expect(field.type == usize);
-        try std.testing.expect(field.default_value_ptr == null);
-    }
-
-    // Only variable-size fields belong in the supplied sizes, regardless of their declaration order
-    const measured = try Format.encodedSizeFromBlockSizes(.{
-        .rows = try RowColumns.encodedSize(input.rows),
-        .flags = try packed_slice.PackedSlice(u3).encodedSize(input.flags),
-        .names = try RaggedSliceBlock(u8).encodedSize(input.names),
-        .values = input.values.len * @sizeOf(u16),
-    });
-    var buffer: [256]u8 align(Format.alignment) = undefined;
-    try std.testing.expectEqual(try Format.encodedSize(input), measured);
-    try std.testing.expectEqual((try Format.write(&buffer, input)).len, measured);
-}
-
 test "Layout sizing needs no input for empty schemas or schemas containing only fixed-size values" {
     const Fixed = Layout(struct { marker: u8, value: u64, empty: extern struct {} });
     const input: Fixed.Input = .{ .marker = 1, .value = 2, .empty = .{} };
     const expected = try Fixed.encodedSize(input);
     const sizer: Fixed.Sizer = .{};
-    try std.testing.expectEqual(expected, try Fixed.encodedSizeFromBlockSizes(.{}));
     try std.testing.expectEqual(expected, try sizer.encodedSize());
     const initial: Fixed.Init = .{ .marker = 1, .value = 2, .empty = .{} };
     try std.testing.expectEqual(expected, try Fixed.initializedSize(initial));
@@ -1225,7 +899,6 @@ test "Layout sizing needs no input for empty schemas or schemas containing only 
 
     const Empty = Layout(struct {});
     const empty: Empty.Sizer = .{};
-    try std.testing.expectEqual(0, try Empty.encodedSizeFromBlockSizes(.{}));
     try std.testing.expectEqual(0, try empty.encodedSize());
 }
 
@@ -1350,9 +1023,9 @@ test "Layout Input preserves field defaults and makes slice elements const" {
     try std.testing.expectEqual(1, view.version.*);
     try std.testing.expectEqual(7, view.header.count);
     try std.testing.expectEqualSlices(u16, &values, view.values);
-    try std.testing.expectEqualStrings("one", try view.names.get(0));
-    try std.testing.expectEqualStrings("two", try view.names.get(1));
-    const row = try view.rows.get(0);
+    try std.testing.expectEqualStrings("one", view.names.get(0));
+    try std.testing.expectEqualStrings("two", view.names.get(1));
+    const row = view.rows.get(0);
     try std.testing.expectEqualStrings("abc", row.text);
     try std.testing.expectEqual(7, row.id);
     // Input defaults must not become defaults for pointers and slices in View
@@ -1387,21 +1060,15 @@ test "Layout viewMutable() edits every block type without changing the stored st
         const view = try Format.viewMutable(payload);
         view.status.* = .complete;
         view.numbers[1] = 42;
-        @memcpy(try view.names.get(0), "ONE");
-        try std.testing.expectEqual(0, (try view.names.get(1)).len);
-        try std.testing.expectError(error.IndexOutOfBounds, view.names.get(view.names.len()));
-        try view.flags.set(1, false);
+        @memcpy(view.names.get(0), "ONE");
+        try std.testing.expectEqual(0, view.names.get(1).len);
+        view.flags.set(1, false);
         view.rows.column(.score)[0] = 99;
-        @memcpy(try view.rows.column(.name).get(2), "THIRD");
-        try view.rows.column(.code).set(2, 0);
+        @memcpy(view.rows.column(.name).get(2), "THIRD");
+        view.rows.column(.code).set(2, 0);
 
-        try std.testing.expectEqual(@as(u32, 99), try view.rows.value(.score, 0));
-        try std.testing.expectEqualDeep(Row{ .score = 30, .name = "THIRD", .code = 0 }, try view.rows.get(2));
-        var iterator = view.rows.iterator();
-        try std.testing.expectEqual(@as(u32, 99), iterator.next().?.score);
-        _ = iterator.next().?;
-        try std.testing.expectEqualStrings("THIRD", iterator.next().?.name);
-        try std.testing.expectEqual(null, iterator.next());
+        try std.testing.expectEqual(@as(u32, 99), view.rows.value(.score, 0));
+        try std.testing.expectEqualDeep(Row{ .score = 30, .name = "THIRD", .code = 0 }, view.rows.get(2));
     }
 
     var reference: [512]u8 align(Format.alignment) = undefined;
@@ -1419,125 +1086,4 @@ test "Layout viewMutable() edits every block type without changing the stored st
     // Comparing the complete encoding also checks every header, offset, and padding byte
     try std.testing.expectEqualSlices(u8, expected, payload);
     _ = try Format.view(payload);
-}
-
-test "Layout describe() identifies each storage representation without a buffer" {
-    const RoverMode = enum(u2) { parked, driving, charging };
-    const Status = enum(u8) { pending, complete };
-    const Row = struct { id: u32 };
-    const Format = Layout(struct {
-        version: u8,
-        samples: []const u32,
-        names: []const []const u8,
-        states: packed_slice.PackedSlice(RoverMode),
-        history: [2]Status,
-        rows: Columns(Row, .{}),
-    });
-    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer output.deinit();
-    try Format.describe(&output.writer);
-    const report = output.written();
-    try std.testing.expect(std.mem.containsAtLeast(u8, report, 1, "Alignment: 8"));
-    for ([_][]const u8{ "Single value", "Contiguous slice", "Variable-length slices", "Bit-packed slice", "Columns", "[]const RoverMode", "[]const Row", "[]const []const u8", "[2]Status" }) |text| {
-        try std.testing.expect(std.mem.containsAtLeast(u8, report, 1, text));
-    }
-}
-
-test "Layout inspect() accounts for blocks, alignment gaps, and the size table" {
-    const Format = Layout(struct {
-        version: u8,
-        samples: []const u32,
-        states: packed_slice.PackedSlice(u2),
-    });
-    const payload = try Format.alloc(std.testing.allocator, .{
-        .version = 1,
-        .samples = &.{ 10, 20 },
-        .states = &.{ 0, 1, 2 },
-    });
-    defer std.testing.allocator.free(payload);
-    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer output.deinit();
-    try Format.inspect(payload, &output.writer);
-    try std.testing.expectEqualStrings(
-        \\+-----------------------------+--------------+--------------+
-        \\| Region                      |       Offset |         Size |
-        \\+-----------------------------+--------------+--------------+
-        \\| version                     |            0 |            1 |
-        \\|   [padding]                 |            1 |            3 |
-        \\| samples (n=2)               |            4 |            8 |
-        \\|   [`states` counts]         |           12 |            4 |
-        \\| states (n=3)                |           16 |            1 |
-        \\|   [padding]                 |           17 |            7 |
-        \\|   [footer]                  |           24 |           24 |
-        \\+-----------------------------+--------------+--------------+
-        \\
-        \\Your data:            10 bytes
-        \\Stash metadata:       28 bytes
-        \\Stash padding:        10 bytes
-        \\------------------------------
-        \\Total:                48 bytes
-        \\
-        \\Alignment: 8
-        \\
-    , output.written());
-}
-
-test "Layout inspect() validates before printing and propagates writer failures" {
-    const State = enum(u8) { ready = 1 };
-    const Format = Layout(struct { state: State });
-    var buffer: [16]u8 align(Format.alignment) = undefined;
-    const payload = try Format.write(&buffer, .{ .state = .ready });
-    var text: [512]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&text);
-    payload[0] = 2;
-    try std.testing.expectError(error.InvalidValue, Format.inspect(payload, &writer));
-    try std.testing.expectError(error.InvalidValue, Format.printBufferLayout(payload));
-    try std.testing.expectEqual(@as(usize, 0), writer.end);
-    payload[0] = 1;
-    payload[1] = 1;
-    try std.testing.expectError(error.InvalidFormat, Format.inspect(payload, &writer));
-    try std.testing.expectError(error.InvalidFormat, Format.printBufferLayout(payload));
-    try std.testing.expectEqual(@as(usize, 0), writer.end);
-    payload[1] = 0;
-    var full_writer = std.Io.Writer.fixed(&.{});
-    try std.testing.expectError(error.WriteFailed, Format.inspect(payload, &full_writer));
-}
-
-test "Layout inspect() separates ragged and columnar metadata from stored values" {
-    const Row = struct { id: u32, name: []const u8, active: bool };
-    const Header = extern struct { version: u8, reserved: [3]u8 = @splat(0), limit: u32 };
-    const Format = Layout(struct {
-        header: Header,
-        groups: []const []const u64,
-        rows: Columns(Row, .{ .packed_fields = &.{.active} }),
-    });
-    const payload = try Format.alloc(std.testing.allocator, .{
-        .header = .{ .version = 1, .limit = 10 },
-        .groups = &.{ &.{ 1, 2 }, &.{}, &.{} },
-        .rows = &.{
-            .{ .id = 1, .name = "ab", .active = true },
-            .{ .id = 2, .name = "", .active = false },
-        },
-    });
-    defer std.testing.allocator.free(payload);
-    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer output.deinit();
-    try Format.inspect(payload, &output.writer);
-    // Header: 8, grouped integers: 16, IDs: 8, string bytes: 2, packed booleans: 1
-    // Three ragged children also require four bytes of alignment after their offset table
-    try std.testing.expect(std.mem.containsAtLeast(u8, output.written(), 1, "Your data:            35 bytes\nStash metadata:       92 bytes\nStash padding:         9 bytes\n"));
-    // Every reported region starts where the previous one ended, with no parent rows counting bytes twice
-    var end: usize = 0;
-    var lines = std.mem.splitScalar(u8, output.written(), '\n');
-    while (lines.next()) |line| {
-        if (!std.mem.startsWith(u8, line, "| ")) continue;
-        var cells = std.mem.splitScalar(u8, line, '|');
-        _ = cells.next();
-        _ = cells.next();
-        const offset = std.fmt.parseInt(usize, std.mem.trim(u8, cells.next().?, " "), 10) catch continue;
-        const size = try std.fmt.parseInt(usize, std.mem.trim(u8, cells.next().?, " "), 10);
-        try std.testing.expectEqual(end, offset);
-        end += size;
-    }
-    try std.testing.expectEqual(payload.len, end);
 }

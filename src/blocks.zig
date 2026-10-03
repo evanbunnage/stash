@@ -34,10 +34,6 @@ pub const ViewError = error{
     InvalidValue,
 };
 
-pub const IndexError = error{
-    IndexOutOfBounds,
-};
-
 /// Choose the correct block type for a given field in a user's layout schema
 pub fn resolveBlockType(comptime T: type) type {
     const type_info = @typeInfo(T);
