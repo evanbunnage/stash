@@ -76,7 +76,7 @@ const view = try MyFormat.view(byte_buffer);
 Requires Zig 0.16.0.
 
 ```sh
-zig fetch --save=stash git+https://github.com/evanbunnage/stash
+zig fetch --save=stash git+https://github.com/evanbunnage/stash#v0.2.0
 ```
 
 Add to `build.zig`:
@@ -89,7 +89,9 @@ const stash = b.dependency("stash", .{
 exe.root_module.addImport("stash", stash.module("stash"));
 ```
 
-Then simply `@import("stash")`
+Then `@import("stash")`
+
+See [examples](examples/) for runnable examples.
 
 ## When should I use stash?
 
