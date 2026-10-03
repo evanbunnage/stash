@@ -362,8 +362,6 @@ pub fn Layout(comptime Schema: type) type {
         /// stash data in a larger buffer, then just make sure its offset is aligned to Format.alignment as well.
         /// That way you can treat MisalignedBuffer errors as data corruption and handle appropriately
         /// for your application.
-        ///
-        /// See more about runtime validation, alginment, etc in docs/
         pub fn view(payload: []const u8) ViewError!View {
             return viewImpl(payload, true);
         }
