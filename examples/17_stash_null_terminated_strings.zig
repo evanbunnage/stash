@@ -1,6 +1,6 @@
 //! Store a null-terminated string and check its terminator when reading it
 //!
-//! zig build example_17
+//! cd examples && zig build example_17
 
 const std = @import("std");
 const stash = @import("stash");

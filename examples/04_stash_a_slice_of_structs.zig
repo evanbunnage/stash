@@ -1,6 +1,6 @@
 //! Store a slice of records and update a record in place
 //!
-//! zig build example_04
+//! cd examples && zig build example_04
 
 const std = @import("std");
 const stash = @import("stash");

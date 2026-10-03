@@ -1,6 +1,6 @@
 //! Refer to stored records by index instead of saving memory addresses
 //!
-//! zig build example_13
+//! cd examples && zig build example_13
 
 const std = @import("std");
 const stash = @import("stash");

@@ -1,6 +1,6 @@
 //! Store flags and small values using only the bits they need
 //!
-//! zig build example_07
+//! cd examples && zig build example_07
 
 const std = @import("std");
 const stash = @import("stash");
@@ -29,12 +29,12 @@ pub fn main(init: std.process.Init) !void {
 
     const view = try Format.viewMutable(byte_buffer);
     std.debug.print("Flags: enabled={}, priority={d}\n", .{ view.flags.enabled, view.flags.priority });
-    std.debug.print("First state before edit: {s}\n", .{@tagName(try view.states.get(0))});
+    std.debug.print("First state before edit: {s}\n", .{@tagName(view.states.get(0))});
 
     // Packed elements share bytes, so set() updates one element without changing its neighbors
-    try view.states.set(0, .complete);
+    view.states.set(0, .complete);
     for (0..4) |index| {
-        std.debug.print("State {d}: {s}\n", .{ index, @tagName(try view.states.get(index)) });
+        std.debug.print("State {d}: {s}\n", .{ index, @tagName(view.states.get(index)) });
     }
     std.debug.print("64 two-bit states use 16 bytes for their values\n", .{});
     std.debug.print("Complete buffer with flags and metadata: {d} bytes\n", .{byte_buffer.len});

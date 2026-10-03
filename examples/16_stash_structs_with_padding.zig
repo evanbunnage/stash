@@ -1,6 +1,6 @@
 //! Give a stored struct explicit padding and fixed-width fields
 //!
-//! zig build example_16
+//! cd examples && zig build example_16
 
 const std = @import("std");
 const stash = @import("stash");

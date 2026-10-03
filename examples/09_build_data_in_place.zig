@@ -1,6 +1,6 @@
 //! Generate a lookup table directly in the output buffer
 //!
-//! zig build example_09
+//! cd examples && zig build example_09
 
 const std = @import("std");
 const stash = @import("stash");

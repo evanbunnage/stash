@@ -1,6 +1,6 @@
 //! Define a binary format with a Zig struct, then write and read data using that format
 //!
-//! zig build example_01
+//! cd examples && zig build example_01
 
 const std = @import("std");
 const stash = @import("stash");

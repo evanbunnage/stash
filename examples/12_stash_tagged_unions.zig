@@ -1,6 +1,6 @@
 //! Store a union using an explicit tag and fields for its alternatives
 //!
-//! zig build example_12
+//! cd examples && zig build example_12
 
 const std = @import("std");
 const stash = @import("stash");

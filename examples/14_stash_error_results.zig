@@ -1,6 +1,6 @@
 //! Store successful results and errors using a numbered status enum
 //!
-//! zig build example_14
+//! cd examples && zig build example_14
 
 const std = @import("std");
 const stash = @import("stash");

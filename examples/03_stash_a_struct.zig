@@ -1,6 +1,6 @@
 //! Store a struct and read its fields zero-copy as a typed view
 //!
-//! zig build example_03
+//! cd examples && zig build example_03
 
 const std = @import("std");
 const stash = @import("stash");

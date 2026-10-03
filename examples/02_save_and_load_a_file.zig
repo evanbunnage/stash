@@ -1,6 +1,6 @@
 //! Save data to a file, then load it and read it using the same format
 //!
-//! zig build example_02
+//! cd examples && zig build example_02
 
 const std = @import("std");
 const stash = @import("stash");

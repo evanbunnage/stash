@@ -1,6 +1,6 @@
 //! Store strings of different lengths and read each one from the buffer
 //!
-//! zig build example_05
+//! cd examples && zig build example_05
 
 const std = @import("std");
 const stash = @import("stash");
@@ -22,7 +22,7 @@ pub fn main(init: std.process.Init) !void {
     const view = try Format.view(byte_buffer);
     for (0..view.names.len()) |index| {
         // get() returns a slice into the buffer for this string
-        const name = try view.names.get(index);
+        const name = view.names.get(index);
         std.debug.print("Name {d}: \"{s}\" ({d} bytes)\n", .{ index, name, name.len });
     }
 }

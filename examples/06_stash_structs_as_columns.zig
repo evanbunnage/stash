@@ -1,6 +1,6 @@
 //! Store records in columns so you can process one field across all rows
 //!
-//! zig build example_06
+//! cd examples && zig build example_06
 
 const std = @import("std");
 const stash = @import("stash");
@@ -35,6 +35,6 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Total score: {d}\n", .{sum});
 
     // get() gathers a row from its columns and returns it by value
-    const row = try view.rows.get(1);
+    const row = view.rows.get(1);
     std.debug.print("Row 1: id={d}, score={d}\n", .{ row.id, row.score });
 }

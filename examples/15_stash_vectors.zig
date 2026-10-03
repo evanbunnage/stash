@@ -1,6 +1,6 @@
 //! Store vector elements as an array, then load them into a vector for arithmetic
 //!
-//! zig build example_15
+//! cd examples && zig build example_15
 
 const std = @import("std");
 const stash = @import("stash");

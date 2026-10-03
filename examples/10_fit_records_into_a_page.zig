@@ -1,6 +1,6 @@
 //! Find how many records fit in a page, then write them into it
 //!
-//! zig build example_10
+//! cd examples && zig build example_10
 
 const std = @import("std");
 const stash = @import("stash");
@@ -40,8 +40,8 @@ pub fn main() !void {
 
     // Pass only the used bytes to view(). If saving the whole page, also save this length
     const view = try Format.view(byte_buffer);
-    var rows_in_page = view.rows.iterator();
-    while (rows_in_page.next()) |row| {
+    for (0..view.rows.len()) |index| {
+        const row = view.rows.get(index);
         std.debug.print("Record {d}: {s}, active={}\n", .{ row.id, row.name, row.active });
     }
     std.debug.print("Records left for the next page: {d}\n", .{rows.len - accepted});

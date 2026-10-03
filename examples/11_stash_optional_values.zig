@@ -1,6 +1,6 @@
 //! Store optional values with a flag that distinguishes a missing value from zero
 //!
-//! zig build example_11
+//! cd examples && zig build example_11
 
 const std = @import("std");
 const stash = @import("stash");
