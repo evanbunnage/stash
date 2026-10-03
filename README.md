@@ -67,9 +67,10 @@ const byte_buffer = try MyFormat.alloc(
 defer allocator.free(byte_buffer);
 
 const view = try MyFormat.view(byte_buffer);
-// Use view before freeing byte_buffer
+// `view` points into `byte_buffer`, so avoid a use-after-free by only using `view` in this defer's scope
 ```
 
+```
 ## Getting started
 
 Requires Zig 0.16.0.
