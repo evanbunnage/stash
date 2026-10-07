@@ -33,6 +33,13 @@ const cases = [_]struct { name: []const u8, expected_message: []const u8 }{
     .{ .name = "void_type", .expected_message = "stash: type is not storable" },
     .{ .name = "packed_float", .expected_message = "stash: packed fields must be integers, bools, enums, or packed structs" },
 
+    .{ .name = "empty_enum", .expected_message = "stash: empty enums are not supported" },
+    .{ .name = "empty_enum_array", .expected_message = "stash: empty enums are not supported" },
+    .{ .name = "empty_enum_slice", .expected_message = "stash: empty enums are not supported" },
+    .{ .name = "empty_enum_column", .expected_message = "stash: empty enums are not supported" },
+    .{ .name = "empty_enum_packed", .expected_message = "stash: empty enums are not supported" },
+    .{ .name = "empty_enum_storable", .expected_message = "stash: empty enums are not supported" },
+
     .{ .name = "nested_pointer", .expected_message = "stash: stored values must not contain pointers" },
     .{ .name = "nested_array_pointer", .expected_message = "stash: stored values must not contain pointers" },
     .{ .name = "empty_pointer_array", .expected_message = "stash: stored values must not contain pointers" },

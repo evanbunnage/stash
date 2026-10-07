@@ -60,36 +60,37 @@ pub const ViewError = error{
 /// ```
 pub fn Layout(comptime Schema: type) type {
     comptime @import("comptime_validation.zig").assertStructHasSupportedSchemaFields(Schema, "Layout");
-    const layout_info = @typeInfo(Schema);
-    const layout_fields = layout_info.@"struct".fields;
+    const layout_info = @typeInfo(Schema).@"struct";
+    const field_names = layout_info.field_names;
+    const field_types = layout_info.field_types;
     return struct {
         const Self = @This();
         const BlockByteRange = struct { offset: usize, size: usize };
-        const BlockByteRanges = [layout_fields.len]BlockByteRange;
+        const BlockByteRanges = [field_names.len]BlockByteRange;
 
         comptime {
-            for (layout_fields) |field| {
-                const Block = blocks.resolveBlockType(field.type);
-                if (field.default_value_ptr != null and Block.Input != field.type and @typeInfo(field.type) != .pointer) {
+            for (field_names, field_types, layout_info.field_attrs) |field_name, FieldType, field_attrs| {
+                const Block = blocks.resolveBlockType(FieldType);
+                if (field_attrs.default_value_ptr != null and Block.Input != FieldType and @typeInfo(FieldType) != .pointer) {
                     @compileError("stash: explicit storage constructors cannot have schema defaults\n" ++
-                        "  field '" ++ field.name ++ "' has a default\n" ++
+                        "  field '" ++ field_name ++ "' has a default\n" ++
                         "  fix: supply the value when constructing the layout's Input");
                 }
             }
         }
 
         /// Each schema field accepts the input type chosen by its block
-        pub const Input = MappedStruct(layout_fields, true, struct {
-            fn map(comptime field: std.builtin.Type.StructField) type {
-                return blocks.resolveBlockType(field.type).Input;
+        pub const Input = MappedStruct(Schema, true, struct {
+            fn map(comptime _: []const u8, comptime FieldType: type) type {
+                return blocks.resolveBlockType(FieldType).Input;
             }
         }.map);
 
         /// Each field borrows its stored values from the buffer.
         /// The buffer must remain valid and immutable while any view, pointer, or slice into it is in use
-        pub const View = MappedStruct(layout_fields, false, struct {
-            fn map(comptime field: std.builtin.Type.StructField) type {
-                return blocks.resolveBlockType(field.type).View;
+        pub const View = MappedStruct(Schema, false, struct {
+            fn map(comptime _: []const u8, comptime FieldType: type) type {
+                return blocks.resolveBlockType(FieldType).View;
             }
         }.map);
 
@@ -101,13 +102,13 @@ pub fn Layout(comptime Schema: type) type {
         /// otherwise they return MisalignedBuffer
         pub const alignment: usize = blk: {
             var result: usize = @alignOf(u64);
-            for (layout_fields) |field| {
-                result = @max(result, blocks.resolveBlockType(field.type).alignment);
+            for (field_types) |FieldType| {
+                result = @max(result, blocks.resolveBlockType(FieldType).alignment);
             }
             break :blk result;
         };
 
-        const BlockSizes = [layout_fields.len]usize;
+        const BlockSizes = [field_names.len]usize;
 
         /// Return a report of the format's alignment and each field's storage and input type.
         /// Print with {f}: std.debug.print("{f}\n", .{Format.describe()})
@@ -138,22 +139,22 @@ pub fn Layout(comptime Schema: type) type {
         /// This supports value fields and Columns, keeping counts rather than the rows themselves.
         /// Writing measures the supplied input again
         pub const Sizer = struct {
-            const Measurements = MappedStruct(layout_fields, false, struct {
-                fn map(comptime field: std.builtin.Type.StructField) type {
-                    const Block = blocks.resolveBlockType(field.type);
+            const Measurements = MappedStruct(Schema, false, struct {
+                fn map(comptime field_name: []const u8, comptime FieldType: type) type {
+                    const Block = blocks.resolveBlockType(FieldType);
                     if (encodedSizeWithoutInput(Block) != null) return void;
                     if (Block.stash_block_info.kind == .columnar) return Block.Sizer;
                     @compileError("stash: Sizer supports only fixed values and Columns\n" ++
-                        "  layout field '" ++ field.name ++ "' does not support incremental sizing\n" ++
+                        "  layout field '" ++ field_name ++ "' does not support incremental sizing\n" ++
                         "  fix: use encodedSize() with the complete input");
                 }
             }.map);
 
             measurements: Measurements = blk: {
                 var result: Measurements = undefined;
-                for (layout_fields) |field| {
-                    const Block = blocks.resolveBlockType(field.type);
-                    @field(result, field.name) = if (encodedSizeWithoutInput(Block) != null) {} else .{};
+                for (field_names, field_types) |field_name, FieldType| {
+                    const Block = blocks.resolveBlockType(FieldType);
+                    @field(result, field_name) = if (encodedSizeWithoutInput(Block) != null) {} else .{};
                 }
                 break :blk result;
             },
@@ -162,12 +163,12 @@ pub fn Layout(comptime Schema: type) type {
             /// Empty columnar blocks still occupy space for their metadata
             pub fn encodedSize(self: @This()) BufferSizeError!usize {
                 var sizes: BlockSizes = undefined;
-                inline for (layout_fields, 0..) |field, index| {
-                    const Block = blocks.resolveBlockType(field.type);
+                inline for (field_names, field_types, 0..) |field_name, FieldType, index| {
+                    const Block = blocks.resolveBlockType(FieldType);
                     sizes[index] = if (comptime encodedSizeWithoutInput(Block)) |size|
                         size
                     else
-                        try @field(self.measurements, field.name).encodedSize();
+                        try @field(self.measurements, field_name).encodedSize();
                 }
                 return totalEncodedSize(sizes);
             }
@@ -205,9 +206,9 @@ pub fn Layout(comptime Schema: type) type {
         // Return the sizes in schema field order so writing can reuse them
         fn calculateEncodedBlockSizes(input: Input) BufferSizeError!BlockSizes {
             var sizes: BlockSizes = undefined;
-            inline for (layout_fields, 0..) |field, index| {
-                const Block = blocks.resolveBlockType(field.type);
-                sizes[index] = try Block.encodedSize(@field(input, field.name));
+            inline for (field_names, field_types, 0..) |field_name, FieldType, index| {
+                const Block = blocks.resolveBlockType(FieldType);
+                sizes[index] = try Block.encodedSize(@field(input, field_name));
             }
             return sizes;
         }
@@ -217,9 +218,9 @@ pub fn Layout(comptime Schema: type) type {
         // Calculate each block's byte size from the supplied values and requested slice counts
         fn calculateInitializedBlockSizes(initial_values: Init) BufferSizeError!BlockSizes {
             var sizes: BlockSizes = undefined;
-            inline for (layout_fields, 0..) |field, index| {
-                const Block = initializableBlock(field);
-                sizes[index] = try Block.initializedSize(@field(initial_values, field.name));
+            inline for (field_names, field_types, 0..) |field_name, FieldType, index| {
+                const Block = initializableBlock(field_name, FieldType);
+                sizes[index] = try Block.initializedSize(@field(initial_values, field_name));
             }
             return sizes;
         }
@@ -227,8 +228,8 @@ pub fn Layout(comptime Schema: type) type {
         // Include alignment padding and the size table in the total size
         fn totalEncodedSize(sizes: BlockSizes) BufferSizeError!usize {
             var byte_count: usize = 0;
-            inline for (layout_fields, sizes) |field, size| {
-                const Block = blocks.resolveBlockType(field.type);
+            inline for (field_types, sizes) |FieldType, size| {
+                const Block = blocks.resolveBlockType(FieldType);
                 const offset = blocks.alignForward(byte_count, Block.alignment) catch return error.InputTooLarge;
                 if (size > std.math.maxInt(u64)) return error.InputTooLarge;
                 byte_count = std.math.add(usize, offset, size) catch return error.InputTooLarge;
@@ -249,9 +250,9 @@ pub fn Layout(comptime Schema: type) type {
         /// Use Init to specify the starting contents of the buffer when calling initialize().
         /// For a value field, supply its value. For a slice field, supply .{ .count = n, .value = x }
         /// to create n elements filled with x, which you can then modify through the returned view
-        pub const Init = MappedStruct(layout_fields, false, struct {
-            fn map(comptime field: std.builtin.Type.StructField) type {
-                const Block = initializableBlock(field);
+        pub const Init = MappedStruct(Schema, false, struct {
+            fn map(comptime field_name: []const u8, comptime FieldType: type) type {
+                const Block = initializableBlock(field_name, FieldType);
                 return Block.Init;
             }
         }.map);
@@ -282,12 +283,12 @@ pub fn Layout(comptime Schema: type) type {
             const ranges = writeBlockMetadata(payload, sizes);
 
             var views: MutableView = undefined;
-            inline for (layout_fields, ranges) |field, range| {
-                const Block = initializableBlock(field);
+            inline for (field_names, field_types, ranges) |field_name, FieldType, range| {
+                const Block = initializableBlock(field_name, FieldType);
                 // Sizing and placement established each block's capacity and alignment
-                @field(views, field.name) = Block.initialize(
+                @field(views, field_name) = Block.initialize(
                     payload[range.offset..][0..range.size],
-                    @field(initial_values, field.name),
+                    @field(initial_values, field_name),
                 ) catch unreachable;
             }
             return .{ .bytes = payload, .view = views };
@@ -300,12 +301,12 @@ pub fn Layout(comptime Schema: type) type {
             const payload = buffer[0..total_size];
             const ranges = writeBlockMetadata(payload, sizes);
 
-            inline for (layout_fields, ranges) |field, range| {
-                const Block = blocks.resolveBlockType(field.type);
+            inline for (field_names, field_types, ranges) |field_name, FieldType, range| {
+                const Block = blocks.resolveBlockType(FieldType);
                 // Sizing and placement established each block's capacity and alignment
                 const written = Block.encode(
                     payload[range.offset..][0..range.size],
-                    @field(input, field.name),
+                    @field(input, field_name),
                 ) catch unreachable;
                 std.debug.assert(written == range.size);
             }
@@ -317,8 +318,8 @@ pub fn Layout(comptime Schema: type) type {
             const size_table_offset = buffer.len - sizeTableByteCount();
             var ranges: BlockByteRanges = undefined;
             var cursor: usize = 0;
-            inline for (layout_fields, sizes, 0..) |field, size, field_index| {
-                const Block = blocks.resolveBlockType(field.type);
+            inline for (field_types, sizes, 0..) |FieldType, size, field_index| {
+                const Block = blocks.resolveBlockType(FieldType);
                 const offset = std.mem.alignForward(usize, cursor, Block.alignment);
                 @memset(buffer[cursor..offset], 0);
                 ranges[field_index] = .{ .offset = offset, .size = size };
@@ -374,9 +375,9 @@ pub fn Layout(comptime Schema: type) type {
         }
 
         /// In-place mutable access to every field in the layout
-        pub const MutableView = MappedStruct(layout_fields, false, struct {
-            fn map(comptime field: std.builtin.Type.StructField) type {
-                const Block = blocks.resolveBlockType(field.type);
+        pub const MutableView = MappedStruct(Schema, false, struct {
+            fn map(comptime _: []const u8, comptime FieldType: type) type {
+                const Block = blocks.resolveBlockType(FieldType);
                 return Block.MutableView;
             }
         }.map);
@@ -388,10 +389,10 @@ pub fn Layout(comptime Schema: type) type {
             if (@intFromPtr(payload.ptr) % alignment != 0) return error.MisalignedBuffer;
             const ranges = try Self.readBlockByteRanges(payload);
             var result: MutableView = undefined;
-            inline for (layout_fields, 0..) |field, field_index| {
-                const Block = blocks.resolveBlockType(field.type);
+            inline for (field_names, field_types, 0..) |field_name, FieldType, field_index| {
+                const Block = blocks.resolveBlockType(FieldType);
                 const range = ranges[field_index];
-                @field(result, field.name) = Block.viewMutable(payload[range.offset..][0..range.size]) catch |err| switch (err) {
+                @field(result, field_name) = Block.viewMutable(payload[range.offset..][0..range.size]) catch |err| switch (err) {
                     error.InvalidValue => return error.InvalidValue,
                     error.BufferTooSmall, error.InvalidFormat => return error.InvalidFormat,
                     // The base address and block offset have already been checked for alignment
@@ -402,11 +403,11 @@ pub fn Layout(comptime Schema: type) type {
         }
 
         // Resolve the field's block type and check that it supports initialization
-        fn initializableBlock(comptime field: std.builtin.Type.StructField) type {
-            const Block = blocks.resolveBlockType(field.type);
+        fn initializableBlock(comptime field_name: []const u8, comptime FieldType: type) type {
+            const Block = blocks.resolveBlockType(FieldType);
             if (!@hasDecl(Block, "Init") or !@hasDecl(Block, "initialize") or !@hasDecl(Block, "initializedSize")) {
                 @compileError("stash: initialization supports only fixed values and one-dimensional slices\n" ++
-                    "  layout field '" ++ field.name ++ "' does not support initialization");
+                    "  layout field '" ++ field_name ++ "' does not support initialization");
             }
             return Block;
         }
@@ -424,12 +425,12 @@ pub fn Layout(comptime Schema: type) type {
             const ranges = try readBlockByteRanges(payload);
             var result: View = undefined;
 
-            inline for (layout_fields, 0..) |field, field_index| {
-                const Block = blocks.resolveBlockType(field.type);
+            inline for (field_names, field_types, 0..) |field_name, FieldType, field_index| {
+                const Block = blocks.resolveBlockType(FieldType);
                 const range = ranges[field_index];
                 const buffer = payload[range.offset..][0..range.size];
                 const block_view = if (comptime validate_values) Block.view(buffer) else Block.viewAssumeValid(buffer);
-                @field(result, field.name) = block_view catch |err| switch (err) {
+                @field(result, field_name) = block_view catch |err| switch (err) {
                     error.InvalidValue => return error.InvalidValue,
                     error.BufferTooSmall, error.InvalidFormat => return error.InvalidFormat,
                     // The base address and block offset have already been checked for alignment
@@ -446,8 +447,8 @@ pub fn Layout(comptime Schema: type) type {
             var result: BlockByteRanges = undefined;
             var cursor: usize = 0;
 
-            inline for (layout_fields, 0..) |field, field_index| {
-                const Block = blocks.resolveBlockType(field.type);
+            inline for (field_types, 0..) |FieldType, field_index| {
+                const Block = blocks.resolveBlockType(FieldType);
                 const offset = blocks.alignForward(cursor, Block.alignment) catch return error.InvalidFormat;
                 if (offset > size_table_offset) return error.InvalidFormat;
                 if (!std.mem.allEqual(u8, payload[cursor..offset], 0)) return error.InvalidFormat;
@@ -471,7 +472,7 @@ pub fn Layout(comptime Schema: type) type {
         }
 
         fn sizeTableByteCount() usize {
-            return layout_fields.len * @sizeOf(u64);
+            return field_names.len * @sizeOf(u64);
         }
     };
 }
@@ -488,24 +489,24 @@ fn encodedSizeWithoutInput(comptime Block: type) ?usize {
 
 // Preserve schema field names while replacing their types
 fn MappedStruct(
-    comptime fields: []const std.builtin.Type.StructField,
+    comptime Schema: type,
     comptime preserve_defaults: bool,
-    comptime mapField: fn (comptime std.builtin.Type.StructField) type,
+    comptime mapField: fn (comptime field_name: []const u8, comptime FieldType: type) type,
 ) type {
-    var field_names: [fields.len][]const u8 = undefined;
-    var field_types: [fields.len]type = undefined;
-    var field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
-    for (fields, 0..) |field, i| {
-        const FieldType = mapField(field);
-        field_names[i] = field.name;
+    const schema_info = @typeInfo(Schema).@"struct";
+    const field_count = schema_info.field_names.len;
+    var field_types: [field_count]type = undefined;
+    var field_attrs: [field_count]std.lang.Type.Struct.FieldAttributes = undefined;
+    for (schema_info.field_names, schema_info.field_types, schema_info.field_attrs, 0..) |field_name, SchemaFieldType, schema_attrs, i| {
+        const FieldType = mapField(field_name, SchemaFieldType);
         field_types[i] = FieldType;
         field_attrs[i] = .{ .@"align" = @alignOf(FieldType) };
-        if (preserve_defaults and field.default_value_ptr != null) {
-            const value: FieldType = field.defaultValue().?;
+        if (preserve_defaults and schema_attrs.default_value_ptr != null) {
+            const value: FieldType = schema_attrs.defaultValue(SchemaFieldType).?;
             field_attrs[i].default_value_ptr = @ptrCast(&value);
         }
     }
-    return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
+    return @Struct(.auto, null, schema_info.field_names, &field_types, &field_attrs);
 }
 
 test "Layout viewMutable() updates stored fields in place" {
@@ -695,7 +696,7 @@ test "Layout alloc() returns an aligned buffer of exactly the required size" {
 }
 
 test "Layout reads a buffer ending at a protected page boundary" {
-    if (comptime builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .macos and builtin.target.os.tag != .linux) return error.SkipZigTest;
 
     const Guarded = Layout(struct {
         first: u64,
@@ -1027,8 +1028,8 @@ test "Layout Input preserves field defaults and makes slice elements const" {
     try std.testing.expectEqualStrings("abc", row.text);
     try std.testing.expectEqual(7, row.id);
     // Input defaults must not become defaults for pointers and slices in View
-    inline for (@typeInfo(Format.View).@"struct".fields) |field| {
-        try std.testing.expect(field.default_value_ptr == null);
+    inline for (@typeInfo(Format.View).@"struct".field_attrs) |field_attrs| {
+        try std.testing.expect(field_attrs.default_value_ptr == null);
     }
 }
 

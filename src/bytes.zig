@@ -90,7 +90,7 @@ test "value views reject a buffer whose starting address is misaligned" {
 
 test "viewMutableValue() lets the caller change a value directly in a provided buffer" {
     for ([_]usize{ 4, 8 }) |length| {
-        var buffer: [8]u8 align(@alignOf(u32)) = .{99} ** 8;
+        var buffer: [8]u8 align(@alignOf(u32)) = @splat(99);
         const value = try viewMutableValue(u32, buffer[0..length]);
         value.* = 0x12345678;
         try std.testing.expectEqualSlices(u8, &.{ 0x78, 0x56, 0x34, 0x12, 99, 99, 99, 99 }, &buffer);
@@ -131,7 +131,7 @@ test "slice views reject a buffer that cannot hold the requested number of eleme
 }
 
 test "slice views reject an element count whose total byte size overflows" {
-    var buffer: [8]u8 align(@alignOf(u32)) = .{0} ** 8;
+    var buffer: [8]u8 align(@alignOf(u32)) = @splat(0);
     // Multiplying this count by four bytes is too large for usize
     // Both functions should return BufferTooSmall instead of overflowing
     const overflowing_count = std.math.maxInt(usize) / @sizeOf(u32) + 1;
@@ -142,7 +142,7 @@ test "slice views reject an element count whose total byte size overflows" {
 test "slice views require an aligned buffer even when no elements are requested" {
     // buffer[1..] is not aligned for u32
     // We reject that address even when the caller asks for zero elements
-    var buffer: [9]u8 align(@alignOf(u32)) = .{0} ** 9;
+    var buffer: [9]u8 align(@alignOf(u32)) = @splat(0);
     for ([_]usize{ 0, 2 }) |count| {
         try std.testing.expectError(error.MisalignedBuffer, viewSlice(u32, buffer[1..], count));
         try std.testing.expectError(error.MisalignedBuffer, viewMutableSlice(u32, buffer[1..], count));
@@ -173,7 +173,7 @@ test "copyValue() copies an independent value from an unaligned buffer" {
 }
 
 test "copyValue() rejects a buffer that is too short" {
-    const buffer = [_]u8{0} ** 4;
+    const buffer: [4]u8 = @splat(0);
     for (0..4) |length| {
         try std.testing.expectError(error.BufferTooSmall, copyValue(u32, buffer[0..length]));
     }

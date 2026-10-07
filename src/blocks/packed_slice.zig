@@ -130,7 +130,7 @@ fn unsignedIntegerType(comptime T: type) type {
 pub fn packedByteCount(comptime T: type, count: usize) blocks.BufferSizeError!usize {
     if (count > std.math.maxInt(u32)) return error.InputTooLarge;
     const total_bits = std.math.mul(usize, count, @bitSizeOf(T)) catch return error.InputTooLarge;
-    return total_bits / 8 + @intFromBool(total_bits % 8 != 0);
+    return @divCeil(total_bits, 8);
 }
 
 /// Check that unused bits in the final byte of the packed values are zero.
@@ -166,7 +166,7 @@ fn toBits(comptime T: type, value: T) unsignedIntegerType(T) {
     return switch (@typeInfo(T)) {
         .int => @bitCast(value),
         .bool => @intFromBool(value),
-        .@"enum" => @bitCast(@intFromEnum(value)),
+        .@"enum" => @bitCast(@backingInt(value)),
         .@"struct" => @bitCast(value),
         else => unreachable,
     };
@@ -177,7 +177,7 @@ fn fromBits(comptime T: type, raw: unsignedIntegerType(T)) T {
     return switch (@typeInfo(T)) {
         .int => @bitCast(raw),
         .bool => raw != 0,
-        .@"enum" => |enum_info| @enumFromInt(@as(enum_info.tag_type, @bitCast(raw))),
+        .@"enum" => |enum_info| @fromBackingInt(@as(enum_info.tag_type, @bitCast(raw))),
         .@"struct" => @bitCast(raw),
         else => unreachable,
     };
@@ -303,7 +303,7 @@ test "PackedSlice stores booleans and fully declared enums without needing value
 }
 
 test "PackedSlice supports an empty slice" {
-    var buffer: [4]u8 = .{99} ** 4;
+    var buffer: [4]u8 = @splat(99);
     const Block = PackedSlice(u3);
     try std.testing.expectEqual(4, try Block.encodedSize(&.{}));
     try std.testing.expectEqual(4, try Block.encode(&buffer, &.{}));
@@ -323,7 +323,7 @@ test "PackedSlice views reject an incomplete element count or packed data" {
 }
 
 test "PackedSlice encode() leaves a destination buffer unchanged when it is too small" {
-    var buffer: [6]u8 = .{99} ** 6;
+    var buffer: [6]u8 = @splat(99);
     for (0..buffer.len) |length| {
         try std.testing.expectError(
             error.NoSpaceLeft,
@@ -335,7 +335,7 @@ test "PackedSlice encode() leaves a destination buffer unchanged when it is too 
 
 test "PackedSlice accepts unaligned buffers and leaves surrounding bytes unchanged" {
     const Block = PackedSlice(u3);
-    var buffer: [8]u8 align(4) = .{99} ** 8;
+    var buffer: [8]u8 align(4) = @splat(99);
     // Packed access copies bits, so starting one byte after an aligned address is allowed
     const written = try Block.encode(buffer[1..], &.{ 1, 2, 7 });
     for ([_]Block.View{
@@ -364,10 +364,10 @@ test "PackedSlice preserves signed integers and signed enum tags" {
 test "PackedSlice accepts undeclared tags in non-exhaustive enums" {
     const NonExhaustiveStatus = enum(u3) { pending = 0, _ };
     var buffer: [5]u8 = undefined;
-    _ = try PackedSlice(NonExhaustiveStatus).encode(&buffer, &.{@enumFromInt(7)});
+    _ = try PackedSlice(NonExhaustiveStatus).encode(&buffer, &.{@fromBackingInt(7)});
     try std.testing.expectEqual(
         @as(u3, 7),
-        @intFromEnum((try PackedSlice(NonExhaustiveStatus).view(&buffer)).get(0)),
+        @backingInt((try PackedSlice(NonExhaustiveStatus).view(&buffer)).get(0)),
     );
 }
 
@@ -413,7 +413,7 @@ test "PackedSlice set() replaces bits as expected" {
     inline for (.{ u3, u9, u65 }) |T| {
         const Block = PackedSlice(T);
         comptime try std.testing.expect(!@hasDecl(Block.View, "set"));
-        var expected = [_]T{std.math.maxInt(T)} ** 9;
+        var expected: [9]T = @splat(std.math.maxInt(T));
         var buffer: [4 + 9 * @sizeOf(T)]u8 align(Block.alignment) = undefined;
         var reference: [buffer.len]u8 align(Block.alignment) = undefined;
         const written = try Block.encode(&buffer, &expected);

@@ -94,7 +94,7 @@ pub fn SliceBlock(comptime T: type) type {
 test "SliceBlock encode() writes consecutive elements without changing trailing bytes" {
     const Block = SliceBlock(u16);
     const items = [_]u16{ 0x0102, 0x0304 };
-    var buffer: [5]u8 align(@alignOf(u16)) = .{99} ** 5;
+    var buffer: [5]u8 align(@alignOf(u16)) = @splat(99);
     try std.testing.expectEqual(4, try Block.encodedSize(&items));
     try std.testing.expectEqual(4, try Block.encode(&buffer, &items));
     // There is no header, and the byte after the elements should not be changed
@@ -124,7 +124,7 @@ test "SliceBlock encodeMutable() and viewMutable() modify the stored records in 
 
 test "SliceBlock rejects a destination buffer that is too small" {
     const Block = SliceBlock(u16);
-    var buffer: [4]u8 align(@alignOf(u16)) = .{99} ** 4;
+    var buffer: [4]u8 align(@alignOf(u16)) = @splat(99);
     for (0..4) |length| {
         try std.testing.expectError(error.NoSpaceLeft, Block.encode(buffer[0..length], &.{ 1, 2 }));
         try std.testing.expectError(
@@ -136,7 +136,7 @@ test "SliceBlock rejects a destination buffer that is too small" {
 }
 
 test "SliceBlock views reject a buffer that ends in the middle of an element" {
-    var buffer: [5]u8 align(@alignOf(u16)) = .{0} ** 5;
+    var buffer: [5]u8 align(@alignOf(u16)) = @splat(0);
     for ([_]usize{ 1, 3, 5 }) |length| {
         try std.testing.expectError(error.InvalidFormat, SliceBlock(u16).view(buffer[0..length]));
         try std.testing.expectError(
@@ -148,7 +148,7 @@ test "SliceBlock views reject a buffer that ends in the middle of an element" {
 
 test "SliceBlock rejects misaligned buffers without writing" {
     const Block = SliceBlock(u16);
-    var buffer: [5]u8 align(@alignOf(u16)) = .{99} ** 5;
+    var buffer: [5]u8 align(@alignOf(u16)) = @splat(99);
     try std.testing.expectError(error.MisalignedBuffer, Block.encode(buffer[1..], &.{ 1, 2 }));
     try std.testing.expectError(
         error.MisalignedBuffer,
@@ -180,7 +180,7 @@ test "SliceBlock accepts undeclared tags in non-exhaustive enums" {
     const buffer = [_]u8{ 0, 250 };
     const values = try SliceBlock(NonExhaustiveStatus).view(&buffer);
     try std.testing.expectEqual(2, values.len);
-    try std.testing.expectEqual(@as(u8, 250), @intFromEnum(values[1]));
+    try std.testing.expectEqual(@as(u8, 250), @backingInt(values[1]));
 }
 
 test "SliceBlock supports an empty slice" {

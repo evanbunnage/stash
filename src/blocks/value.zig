@@ -82,7 +82,7 @@ pub fn ValueBlock(comptime T: type) type {
 
 test "ValueBlock encode() writes one value without changing trailing bytes" {
     const Block = ValueBlock(u32);
-    var buffer: [5]u8 align(@alignOf(u32)) = .{99} ** 5;
+    var buffer: [5]u8 align(@alignOf(u32)) = @splat(99);
     try std.testing.expectEqual(4, try Block.encodedSize(0x01020304));
     try std.testing.expectEqual(4, try Block.encode(&buffer, 0x01020304));
     // The fifth byte is outside the value and should not be changed
@@ -94,7 +94,7 @@ test "ValueBlock encode() writes one value without changing trailing bytes" {
 
 test "ValueBlock encodeMutable() and viewMutable() modify the stored value in place" {
     const Block = ValueBlock(u32);
-    var buffer: [5]u8 align(@alignOf(u32)) = .{99} ** 5;
+    var buffer: [5]u8 align(@alignOf(u32)) = @splat(99);
     const value = try Block.encodeMutable(&buffer, 12);
     try std.testing.expectEqual(@as(u32, 12), value.*);
     value.* = 34;
@@ -106,7 +106,7 @@ test "ValueBlock encodeMutable() and viewMutable() modify the stored value in pl
 
 test "ValueBlock rejects a buffer that is too short without changing it" {
     const Block = ValueBlock(u32);
-    var buffer: [4]u8 align(@alignOf(u32)) = .{99} ** 4;
+    var buffer: [4]u8 align(@alignOf(u32)) = @splat(99);
     for (0..4) |length| {
         try std.testing.expectError(error.NoSpaceLeft, Block.encode(buffer[0..length], 12));
         try std.testing.expectError(error.NoSpaceLeft, Block.encodeMutable(buffer[0..length], 12));
@@ -117,14 +117,14 @@ test "ValueBlock rejects a buffer that is too short without changing it" {
 }
 
 test "ValueBlock views reject trailing bytes" {
-    var buffer: [5]u8 align(@alignOf(u32)) = .{0} ** 5;
+    var buffer: [5]u8 align(@alignOf(u32)) = @splat(0);
     try std.testing.expectError(error.InvalidFormat, ValueBlock(u32).view(&buffer));
     try std.testing.expectError(error.InvalidFormat, ValueBlock(u32).viewMutable(&buffer));
 }
 
 test "ValueBlock rejects misaligned buffers without writing" {
     const Block = ValueBlock(u32);
-    var buffer: [5]u8 align(@alignOf(u32)) = .{99} ** 5;
+    var buffer: [5]u8 align(@alignOf(u32)) = @splat(99);
     // Starting one byte after an aligned address leaves enough space but breaks alignment
     try std.testing.expectError(error.MisalignedBuffer, Block.encode(buffer[1..], 12));
     try std.testing.expectError(error.MisalignedBuffer, Block.encodeMutable(buffer[1..], 12));
@@ -152,7 +152,7 @@ test "ValueBlock accepts undeclared tags in non-exhaustive enums" {
     const buffer = [_]u8{250};
     try std.testing.expectEqual(
         @as(u8, 250),
-        @intFromEnum((try ValueBlock(NonExhaustiveStatus).view(&buffer)).*),
+        @backingInt((try ValueBlock(NonExhaustiveStatus).view(&buffer)).*),
     );
 }
 

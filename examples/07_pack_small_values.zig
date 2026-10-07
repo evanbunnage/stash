@@ -20,7 +20,9 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Example 07: Pack small values\n", .{});
 
     const allocator = init.gpa;
-    const states = [_]State{ .pending, .active, .complete, .pending } ** 16;
+    var states: [64]State = @splat(.pending);
+    states[1] = .active;
+    states[2] = .complete;
     const byte_buffer = try Format.alloc(allocator, .{
         .flags = .{ .enabled = true, .priority = 5 },
         .states = &states,

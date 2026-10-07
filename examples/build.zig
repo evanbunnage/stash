@@ -43,7 +43,7 @@ pub fn build(b: *std.Build) void {
         run.stdio = .inherit;
         if (comptime std.mem.eql(u8, name, "02_save_and_load_a_file")) {
             // Keep the example's output file in the build cache
-            run.setCwd(.{ .cwd_relative = b.cache_root.path orelse "." });
+            run.setCwd(.cache_root);
         }
         b.step("example_" ++ name[0..2], "Run " ++ name ++ ".zig").dependOn(&run.step);
         all_step.dependOn(&run.step);

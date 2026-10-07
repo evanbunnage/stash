@@ -65,7 +65,7 @@ fn runCase(gpa: Allocator, seed: u64) !void {
     inline for (layouts, 0..) |Format, index| {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
-        var prng: std.Random.DefaultPrng = .init(seed ^ (index *% 0x9e3779b97f4a7c15));
+        var prng: std.Random.DefaultPrng = .init(seed ^ (@as(u64, index) *% 0x9e3779b97f4a7c15));
         try checkLayout(Format, prng.random(), arena.allocator());
     }
 }
@@ -159,7 +159,7 @@ fn resizeBlock(comptime Format: type, random: std.Random, buffer: []u8, len: *us
 // Corruptions aim at the bytes most likely to slip past validation: counts, offsets, the block
 // size table, lengths, and single bits
 fn corrupt(comptime Format: type, random: std.Random, buffer: []u8, len: *usize) void {
-    const field_count = std.meta.fields(Format.View).len;
+    const field_count = @typeInfo(Format.View).@"struct".field_names.len;
     switch (random.uintLessThan(u8, 7)) {
         0 => if (len.* > 0) {
             buffer[random.uintLessThan(usize, len.*)] ^= @as(u8, 1) << random.int(u3);
@@ -202,10 +202,11 @@ fn checkEdits(comptime Format: type, random: std.Random, arena: Allocator, encod
     const buffer = try alignedBuffer(Format, arena, encoded.len);
     @memcpy(buffer, encoded);
     const mutable = try Format.viewMutable(buffer);
-    inline for (std.meta.fields(Format.MutableView)) |field| {
-        const Element = InputElement(Format, field.name);
-        const block = @field(mutable, field.name);
-        switch (comptime kindOf(field.type)) {
+    const view_info = @typeInfo(Format.MutableView).@"struct";
+    inline for (view_info.field_names, view_info.field_types) |field_name, FieldView| {
+        const Element = InputElement(Format, field_name);
+        const block = @field(mutable, field_name);
+        switch (comptime kindOf(FieldView)) {
             .value => block.* = try generate(@TypeOf(block.*), random, arena),
             .slice => if (block.len > 0) {
                 block[random.uintLessThan(usize, block.len)] = try generate(Element, random, arena);
@@ -219,11 +220,12 @@ fn checkEdits(comptime Format: type, random: std.Random, arena: Allocator, encod
             },
             .columns => if (block.len() > 0) {
                 const row = random.uintLessThan(usize, block.len());
-                inline for (std.meta.fields(Element)) |column_field| {
-                    const column = block.column(@field(std.meta.FieldEnum(Element), column_field.name));
+                const row_info = @typeInfo(Element).@"struct";
+                inline for (row_info.field_names, row_info.field_types) |column_name, ColumnType| {
+                    const column = block.column(@field(std.meta.FieldEnum(Element), column_name));
                     switch (comptime kindOf(@TypeOf(column))) {
-                        .slice => column[row] = try generate(column_field.type, random, arena),
-                        .packed_slice => column.set(row, try generate(column_field.type, random, arena)),
+                        .slice => column[row] = try generate(ColumnType, random, arena),
+                        .packed_slice => column.set(row, try generate(ColumnType, random, arena)),
                         .ragged => {
                             const child = column.get(row);
                             if (child.len > 0) child[random.uintLessThan(usize, child.len)] = try generate(@TypeOf(child[0]), random, arena);
@@ -239,17 +241,17 @@ fn checkEdits(comptime Format: type, random: std.Random, arena: Allocator, encod
 
 // Measure every Columns row with Sizer. An exact budget accepts every row, and one byte less rejects one
 fn checkSizer(comptime Format: type, input: Format.Input, size: usize) !void {
-    const FieldId = @typeInfo(@TypeOf(Format.Sizer.tryAppend)).@"fn".params[1].type.?;
+    const FieldId = @typeInfo(@TypeOf(Format.Sizer.tryAppend)).@"fn".param_types[1].?;
     var row_count: usize = 0;
     inline for (.{ size, size -| 1 }, 0..) |budget, attempt| {
         var sizer: Format.Sizer = .{};
         var accepted: usize = 0;
-        inline for (std.meta.fields(Format.Input)) |field| {
-            if (comptime kindOf(@FieldType(Format.View, field.name)) == .columns) {
-                for (@field(input, field.name)) |row| {
-                    if (try sizer.tryAppend(@field(FieldId, field.name), row, .{ .max_size = budget })) accepted += 1;
+        inline for (@typeInfo(Format.Input).@"struct".field_names) |field_name| {
+            if (comptime kindOf(@FieldType(Format.View, field_name)) == .columns) {
+                for (@field(input, field_name)) |row| {
+                    if (try sizer.tryAppend(@field(FieldId, field_name), row, .{ .max_size = budget })) accepted += 1;
                 }
-                if (attempt == 0) row_count += @field(input, field.name).len;
+                if (attempt == 0) row_count += @field(input, field_name).len;
             }
         }
         if (attempt == 0) {
@@ -264,9 +266,9 @@ fn checkSizer(comptime Format: type, input: Format.Input, size: usize) !void {
 // initialize() followed by filling each slice through its mutable view must match write()
 fn checkInitialize(comptime Format: type, arena: Allocator, input: Format.Input, encoded: []const u8) !void {
     var initial: Format.Init = undefined;
-    inline for (std.meta.fields(Format.Init)) |field| {
-        const value = @field(input, field.name);
-        @field(initial, field.name) = switch (comptime kindOf(@FieldType(Format.View, field.name))) {
+    inline for (@typeInfo(Format.Init).@"struct".field_names) |field_name| {
+        const value = @field(input, field_name);
+        @field(initial, field_name) = switch (comptime kindOf(@FieldType(Format.View, field_name))) {
             .value => value,
             // The fill value is overwritten below, so any element works
             .slice => .{ .count = value.len, .value = std.mem.zeroes(@TypeOf(value[0])) },
@@ -276,9 +278,9 @@ fn checkInitialize(comptime Format: type, arena: Allocator, input: Format.Input,
     try std.testing.expectEqual(encoded.len, try Format.initializedSize(initial));
     const buffer = try alignedBuffer(Format, arena, encoded.len);
     const initialized = try Format.initialize(buffer, initial);
-    inline for (std.meta.fields(Format.Init)) |field| {
-        if (comptime kindOf(@FieldType(Format.View, field.name)) == .slice) {
-            @memcpy(@field(initialized.view, field.name), @field(input, field.name));
+    inline for (@typeInfo(Format.Init).@"struct".field_names) |field_name| {
+        if (comptime kindOf(@FieldType(Format.View, field_name)) == .slice) {
+            @memcpy(@field(initialized.view, field_name), @field(input, field_name));
         }
     }
     try std.testing.expectEqualSlices(u8, encoded, initialized.bytes);
@@ -303,15 +305,15 @@ fn kindOf(comptime ViewType: type) Kind {
 }
 
 fn supportsSizer(comptime Format: type) bool {
-    for (std.meta.fields(Format.View)) |field| {
-        if (kindOf(field.type) != .value and kindOf(field.type) != .columns) return false;
+    for (@typeInfo(Format.View).@"struct".field_types) |FieldView| {
+        if (kindOf(FieldView) != .value and kindOf(FieldView) != .columns) return false;
     }
     return true;
 }
 
 fn supportsInitialize(comptime Format: type) bool {
-    for (std.meta.fields(Format.View)) |field| {
-        if (kindOf(field.type) != .value and kindOf(field.type) != .slice) return false;
+    for (@typeInfo(Format.View).@"struct".field_types) |FieldView| {
+        if (kindOf(FieldView) != .value and kindOf(FieldView) != .slice) return false;
     }
     return true;
 }
@@ -324,13 +326,14 @@ fn InputElement(comptime Format: type, comptime name: []const u8) type {
 // Copy every view back into an Input so it can be written again
 fn toInput(comptime Format: type, arena: Allocator, view: anytype) Allocator.Error!Format.Input {
     var input: Format.Input = undefined;
-    inline for (std.meta.fields(@TypeOf(view))) |field| {
-        const block = @field(view, field.name);
-        @field(input, field.name) = switch (comptime kindOf(field.type)) {
+    const view_info = @typeInfo(@TypeOf(view)).@"struct";
+    inline for (view_info.field_names, view_info.field_types) |field_name, FieldView| {
+        const block = @field(view, field_name);
+        @field(input, field_name) = switch (comptime kindOf(FieldView)) {
             .value => block.*,
             .slice => block,
             .ragged, .packed_slice, .columns => items: {
-                const items = try arena.alloc(InputElement(Format, field.name), block.len());
+                const items = try arena.alloc(InputElement(Format, field_name), block.len());
                 for (items, 0..) |*item, index| item.* = block.get(index);
                 break :items items;
             },
@@ -349,12 +352,12 @@ fn generate(comptime T: type, random: std.Random, arena: Allocator) Allocator.Er
             else => random.int(T),
         },
         .bool => return random.boolean(),
-        .float => return @bitCast(random.int(std.meta.Int(.unsigned, @bitSizeOf(T)))),
+        .float => return @bitCast(random.int(@Int(.unsigned, @bitSizeOf(T)))),
         .@"enum" => |info| {
-            if (!info.is_exhaustive) return @enumFromInt(random.int(info.tag_type));
-            const choice = random.uintLessThan(usize, info.fields.len);
-            inline for (info.fields, 0..) |field, index| {
-                if (index == choice) return @enumFromInt(field.value);
+            if (info.mode == .nonexhaustive) return @fromBackingInt(random.int(info.tag_type));
+            const choice = random.uintLessThan(usize, info.field_values.len);
+            inline for (info.field_values, 0..) |field_value, index| {
+                if (index == choice) return @fromBackingInt(field_value);
             }
             unreachable;
         },
@@ -365,7 +368,7 @@ fn generate(comptime T: type, random: std.Random, arena: Allocator) Allocator.Er
         },
         .@"struct" => |info| {
             var result: T = undefined;
-            inline for (info.fields) |field| @field(result, field.name) = try generate(field.type, random, arena);
+            inline for (info.field_names, info.field_types) |field_name, FieldType| @field(result, field_name) = try generate(FieldType, random, arena);
             return result;
         },
         .pointer => |info| {

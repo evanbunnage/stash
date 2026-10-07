@@ -22,22 +22,20 @@ const packed_slice = @import("blocks/packed_slice.zig");
 const Columns = @import("blocks/columnar.zig").Columns;
 const Layout = @import("layout.zig").Layout;
 
-const Fields = []const std.builtin.Type.StructField;
-
 /// Lists the format's alignment and each field's storage and input type
 pub fn SchemaReport(comptime Schema: type, comptime alignment: usize) type {
-    const layout_fields = @typeInfo(Schema).@"struct".fields;
+    const layout_info = @typeInfo(Schema).@"struct";
     return struct {
         pub fn format(_: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
             const type_width = comptime blk: {
                 var longest: usize = "Type".len;
-                for (layout_fields) |field| {
-                    const Block = blocks.resolveBlockType(field.type);
+                for (layout_info.field_types) |FieldType| {
+                    const Block = blocks.resolveBlockType(FieldType);
                     longest = @max(longest, typeName(Block.Input).len);
                 }
                 break :blk longest;
             };
-            const field_width = comptime fieldWidth(layout_fields);
+            const field_width = comptime fieldWidth(Schema);
             const widths = .{ field_width, 22, type_width };
             try writeBorder(writer, &widths);
             try writeLabel(writer, field_width, "Field");
@@ -46,8 +44,8 @@ pub fn SchemaReport(comptime Schema: type, comptime alignment: usize) type {
             try writer.splatByteAll(' ', type_width - "Type".len);
             try writer.writeAll(" |\n");
             try writeBorder(writer, &widths);
-            inline for (layout_fields) |field| {
-                const Block = blocks.resolveBlockType(field.type);
+            inline for (layout_info.field_names, layout_info.field_types) |field_name, FieldType| {
+                const Block = blocks.resolveBlockType(FieldType);
                 const storage: []const u8 = switch (Block.stash_block_info.kind) {
                     .value => "Single value",
                     .slice => "Contiguous slice",
@@ -56,7 +54,7 @@ pub fn SchemaReport(comptime Schema: type, comptime alignment: usize) type {
                     .columnar => "Columns",
                     else => unreachable,
                 };
-                try writeLabel(writer, field_width, field.name);
+                try writeLabel(writer, field_width, field_name);
                 const type_name = comptime typeName(Block.Input);
                 try writer.print(" {s:<22} | {s}", .{ storage, type_name });
                 try writer.splatByteAll(' ', type_width - type_name.len);
@@ -72,7 +70,7 @@ pub fn SchemaReport(comptime Schema: type, comptime alignment: usize) type {
 /// used by stored values, stash metadata, and padding. Stored values are not printed.
 /// The report borrows the buffer, which must remain valid and unchanged while the report is in use
 pub fn BufferReport(comptime Schema: type, comptime alignment: usize, comptime View: type, comptime Ranges: type) type {
-    const layout_fields = @typeInfo(Schema).@"struct".fields;
+    const layout_info = @typeInfo(Schema).@"struct";
     return struct {
         payload: []const u8,
         views: View,
@@ -85,11 +83,11 @@ pub fn BufferReport(comptime Schema: type, comptime alignment: usize, comptime V
 
             // Counts normally fit within the buffer size, but zero-sized arrays and columns can exceed it
             var largest_count = self.payload.len;
-            inline for (layout_fields) |field| {
-                const Block = blocks.resolveBlockType(field.type);
-                largest_count = @max(largest_count, storedEntryCount(Block, @field(self.views, field.name)) orelse 0);
+            inline for (layout_info.field_names, layout_info.field_types) |field_name, FieldType| {
+                const Block = blocks.resolveBlockType(FieldType);
+                largest_count = @max(largest_count, storedEntryCount(Block, @field(self.views, field_name)) orelse 0);
             }
-            const field_width = comptime fieldWidth(layout_fields);
+            const field_width = comptime fieldWidth(Schema);
             const region_width = field_width + 5 + std.fmt.count("{d}", .{largest_count});
             const widths = .{ region_width, 12, 12 };
             try writeBorder(writer, &widths);
@@ -100,15 +98,15 @@ pub fn BufferReport(comptime Schema: type, comptime alignment: usize, comptime V
             var cursor: usize = 0;
             var value_bytes: usize = 0;
             var metadata_bytes: usize = table_size;
-            inline for (layout_fields, self.ranges) |field, range| {
+            inline for (layout_info.field_names, layout_info.field_types, self.ranges) |field_name, FieldType, range| {
                 if (range.offset > cursor) {
                     try writeRange(writer, region_width, "  [padding]", cursor, range.offset - cursor, null);
                 }
-                const Block = blocks.resolveBlockType(field.type);
-                const block_view = @field(self.views, field.name);
+                const Block = blocks.resolveBlockType(FieldType);
+                const block_view = @field(self.views, field_name);
                 value_bytes += storedValueByteCount(Block, block_view);
                 metadata_bytes += blockMetadataByteCount(Block, block_view);
-                try writeBlockRegions(Block, writer, region_width, self.payload[range.offset..][0..range.size], range.offset, field.name, block_view);
+                try writeBlockRegions(Block, writer, region_width, self.payload[range.offset..][0..range.size], range.offset, field_name, block_view);
                 cursor = range.offset + range.size;
             }
             if (self.table_offset > cursor) {
@@ -124,20 +122,22 @@ pub fn BufferReport(comptime Schema: type, comptime alignment: usize, comptime V
 }
 
 // Leave room for both schema field names and the metadata rows
-fn fieldWidth(comptime layout_fields: Fields) usize {
+fn fieldWidth(comptime Schema: type) usize {
+    const layout_info = @typeInfo(Schema).@"struct";
     var longest: usize = 18;
-    for (layout_fields) |field| {
-        longest = @max(longest, field.name.len);
-        const Block = blocks.resolveBlockType(field.type);
+    for (layout_info.field_names, layout_info.field_types) |field_name, FieldType| {
+        longest = @max(longest, field_name.len);
+        const Block = blocks.resolveBlockType(FieldType);
         if (Block.stash_block_info.kind == .packed_slice or Block.stash_block_info.kind == .ragged_slice or Block.stash_block_info.kind == .columnar) {
-            longest = @max(longest, 4 + field.name.len + " offsets".len);
+            longest = @max(longest, 4 + field_name.len + " offsets".len);
         }
         if (Block.stash_block_info.kind == .columnar) {
-            longest = @max(longest, 4 + field.name.len + " column directory".len);
-            for (std.meta.fields(Block.stash_block_info.Element)) |column| {
-                longest = @max(longest, field.name.len + 1 + column.name.len);
-                if (@typeInfo(column.type) == .pointer) {
-                    longest = @max(longest, 4 + field.name.len + 1 + column.name.len + " offsets".len);
+            longest = @max(longest, 4 + field_name.len + " column directory".len);
+            const row_info = @typeInfo(Block.stash_block_info.Element).@"struct";
+            for (row_info.field_names, row_info.field_types) |column_name, ColumnType| {
+                longest = @max(longest, field_name.len + 1 + column_name.len);
+                if (@typeInfo(ColumnType) == .pointer) {
+                    longest = @max(longest, 4 + field_name.len + 1 + column_name.len + " offsets".len);
                 }
             }
         }
@@ -202,24 +202,24 @@ fn writeBlockRegions(
         },
         .columnar => {
             // Columnar storage begins with two u32 counts and an offset/size pair per column
-            const fields = std.meta.fields(info.Element);
+            const row_info = @typeInfo(info.Element).@"struct";
             const counts_size = 2 * @sizeOf(u32);
             const Entry = extern struct { offset: u32, size: u32 };
-            const table_size = fields.len * @sizeOf(Entry);
+            const table_size = row_info.field_names.len * @sizeOf(Entry);
             try writeRange(writer, width, "  [`" ++ name ++ "` counts]", offset, counts_size, null);
             try writeRange(writer, width, "  [`" ++ name ++ "` column directory]", offset + counts_size, table_size, null);
             var cursor = counts_size + table_size;
-            inline for (fields, 0..) |field, index| {
+            inline for (row_info.field_names, row_info.field_types, 0..) |column_name, ColumnType, index| {
                 const entry = bytes.copyValue(Entry, buffer[counts_size + index * @sizeOf(Entry) ..]) catch unreachable;
                 if (entry.offset > cursor) {
                     try writeRange(writer, width, "  [padding]", offset + cursor, entry.offset - cursor, null);
                 }
-                const field_id = @field(Block.Field, field.name);
-                if (comptime std.mem.indexOfScalar(Block.Field, info.options.packed_fields, field_id) == null and @typeInfo(field.type) == .pointer) {
-                    const ChildBlock = RaggedSliceBlock(@typeInfo(field.type).pointer.child);
-                    try writeBlockRegions(ChildBlock, writer, width, buffer[entry.offset..][0..entry.size], offset + entry.offset, name ++ "." ++ field.name, block_view.column(field_id));
+                const field_id = @field(Block.Field, column_name);
+                if (comptime std.mem.indexOfScalar(Block.Field, info.options.packed_fields, field_id) == null and @typeInfo(ColumnType) == .pointer) {
+                    const ChildBlock = RaggedSliceBlock(@typeInfo(ColumnType).pointer.child);
+                    try writeBlockRegions(ChildBlock, writer, width, buffer[entry.offset..][0..entry.size], offset + entry.offset, name ++ "." ++ column_name, block_view.column(field_id));
                 } else {
-                    try writeRange(writer, width, name ++ "." ++ field.name, offset + entry.offset, entry.size, block_view.len());
+                    try writeRange(writer, width, name ++ "." ++ column_name, offset + entry.offset, entry.size, block_view.len());
                 }
                 cursor = @as(usize, entry.offset) + entry.size;
             }
@@ -231,7 +231,7 @@ fn writeBlockRegions(
 // Preserve slice and array syntax while omitting module names from named element types
 fn typeName(comptime T: type) []const u8 {
     return switch (@typeInfo(T)) {
-        .pointer => |pointer| "[]" ++ (if (pointer.is_const) "const " else "") ++ typeName(pointer.child),
+        .pointer => |pointer| "[]" ++ (if (pointer.attrs.@"const") "const " else "") ++ typeName(pointer.child),
         .array => |array| std.fmt.comptimePrint("[{d}]{s}", .{ array.len, typeName(array.child) }),
         .@"struct", .@"enum" => blk: {
             const name = @typeName(T);
@@ -265,11 +265,11 @@ fn blockMetadataByteCount(comptime Block: type, block_view: Block.View) usize {
         .packed_slice => @sizeOf(u32),
         .ragged_slice => @sizeOf(u32) + std.mem.sliceAsBytes(block_view.offsets).len,
         .columnar => count: {
-            const fields = std.meta.fields(info.Element);
-            var total: usize = 2 * @sizeOf(u32) + fields.len * 2 * @sizeOf(u32);
-            inline for (fields) |field| {
-                const field_id = @field(Block.Field, field.name);
-                if (comptime @typeInfo(field.type) == .pointer and std.mem.indexOfScalar(Block.Field, info.options.packed_fields, field_id) == null) {
+            const row_info = @typeInfo(info.Element).@"struct";
+            var total: usize = 2 * @sizeOf(u32) + row_info.field_names.len * 2 * @sizeOf(u32);
+            inline for (row_info.field_names, row_info.field_types) |column_name, ColumnType| {
+                const field_id = @field(Block.Field, column_name);
+                if (comptime @typeInfo(ColumnType) == .pointer and std.mem.indexOfScalar(Block.Field, info.options.packed_fields, field_id) == null) {
                     const column = block_view.column(field_id);
                     total += @sizeOf(u32) + std.mem.sliceAsBytes(column.offsets).len;
                 }
@@ -289,12 +289,13 @@ fn storedValueByteCount(comptime Block: type, block_view: Block.View) usize {
         .packed_slice => block_view.data.len,
         .columnar => count: {
             var total: usize = 0;
-            inline for (std.meta.fields(info.Element)) |field| {
-                const field_id = @field(Block.Field, field.name);
+            const row_info = @typeInfo(info.Element).@"struct";
+            inline for (row_info.field_names, row_info.field_types) |column_name, ColumnType| {
+                const field_id = @field(Block.Field, column_name);
                 const column = block_view.column(field_id);
                 if (comptime std.mem.indexOfScalar(Block.Field, info.options.packed_fields, field_id) != null) {
                     total += column.data.len;
-                } else if (comptime @typeInfo(field.type) == .pointer) {
+                } else if (comptime @typeInfo(ColumnType) == .pointer) {
                     total += std.mem.sliceAsBytes(column.values).len;
                 } else {
                     total += std.mem.sliceAsBytes(column).len;

@@ -43,7 +43,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(check_step);
 
     fmt_check_step.dependOn(&b.addFmt(.{
-        .paths = &.{ "build.zig", "build.zig.zon", "src", "testing" },
+        .paths = b.pathList(&.{ "build.zig", "build.zig.zon", "src", "testing" }),
         .check = true,
     }).step);
 }

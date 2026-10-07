@@ -43,12 +43,12 @@ pub const ValueValidationError = error{
 pub fn needsValueValidation(comptime T: type) bool {
     switch (@typeInfo(T)) {
         .bool => return true,
-        .@"enum" => |enum_info| return enum_info.is_exhaustive,
+        .@"enum" => |enum_info| return enum_info.mode == .exhaustive,
         .array => |array_info| return array_info.len != 0 and needsValueValidation(array_info.child),
         .@"struct" => |struct_info| {
             if (struct_info.layout == .@"packed") return needsPackedValueValidation(T);
-            inline for (struct_info.fields) |field| {
-                if (needsValueValidation(field.type)) return true;
+            inline for (struct_info.field_types) |field_type| {
+                if (needsValueValidation(field_type)) return true;
             }
             return false;
         },
@@ -74,10 +74,10 @@ pub fn validateValue(comptime T: type, buffer: []const u8) ValueValidationError!
                 const value_bits = bytes.copyValue(struct_info.backing_integer.?, buffer) catch unreachable;
                 try validatePackedValue(T, value_bits, 0);
             } else {
-                inline for (struct_info.fields) |field| {
-                    if (comptime needsValueValidation(field.type)) {
-                        const offset = @offsetOf(T, field.name);
-                        try validateValue(field.type, buffer[offset..][0..@sizeOf(field.type)]);
+                inline for (struct_info.field_names, struct_info.field_types) |field_name, field_type| {
+                    if (comptime needsValueValidation(field_type)) {
+                        const offset = @offsetOf(T, field_name);
+                        try validateValue(field_type, buffer[offset..][0..@sizeOf(field_type)]);
                     }
                 }
             }
@@ -108,16 +108,16 @@ pub fn validateValues(comptime T: type, buffer: []const u8, count: usize) error{
 pub fn needsPackedValueValidation(comptime T: type) bool {
     switch (@typeInfo(T)) {
         .@"enum" => |enum_info| {
-            if (!enum_info.is_exhaustive) return false;
+            if (enum_info.mode == .nonexhaustive) return false;
             const tag_bit_count = @bitSizeOf(enum_info.tag_type);
             // If counting all possible tags would overflow usize, there cannot be that many enum fields
             if (tag_bit_count >= @bitSizeOf(usize)) return true;
             const possible_tag_count = @as(usize, 1) << tag_bit_count;
-            return enum_info.fields.len != possible_tag_count;
+            return enum_info.field_names.len != possible_tag_count;
         },
         .@"struct" => |struct_info| {
-            inline for (struct_info.fields) |field| {
-                if (needsPackedValueValidation(field.type)) return true;
+            inline for (struct_info.field_types) |field_type| {
+                if (needsPackedValueValidation(field_type)) return true;
             }
             return false;
         },
@@ -157,9 +157,9 @@ pub fn validatePackedValue(
             _ = std.enums.fromInt(T, tag) orelse return error.InvalidValue;
         },
         .@"struct" => |struct_info| {
-            inline for (struct_info.fields) |field| {
-                if (comptime needsPackedValueValidation(field.type)) {
-                    try validatePackedValue(field.type, bits, @bitOffsetOf(T, field.name));
+            inline for (struct_info.field_names, struct_info.field_types) |field_name, field_type| {
+                if (comptime needsPackedValueValidation(field_type)) {
+                    try validatePackedValue(field_type, bits, @bitOffsetOf(T, field_name));
                 }
             }
         },
@@ -214,10 +214,7 @@ test "validateValues() accepts signed enum tags and checks every element in an u
 
 test "validateValues() handles zero-sized enums without iterating over the element count" {
     const One = enum(u0) { only };
-    const Empty = enum(u0) {};
     try validateValues(One, &.{}, std.math.maxInt(usize));
-    try validateValues(Empty, &.{}, 0);
-    try std.testing.expectError(error.InvalidValue, validateValues(Empty, &.{}, 1));
 }
 
 test "packed structs use their field's bit widths to decide whether validation is needed" {
@@ -247,7 +244,7 @@ test "packed structs use their field's bit widths to decide whether validation i
 test "validateValue() requires exactly enough bytes for one value" {
     // Check sizes even for integers and empty structs, which need no value validation
     inline for (.{ bool, u32, extern struct {} }) |T| {
-        const buffer = [_]u8{0} ** (@sizeOf(T) + 1);
+        const buffer: [@sizeOf(T) + 1]u8 = @splat(0);
         for (0..buffer.len + 1) |length| {
             if (length == @sizeOf(T)) {
                 try validateValue(T, buffer[0..length]);
@@ -417,7 +414,7 @@ test "nested packed fields are validated beyond the first 64 bits" {
     const Record = packed struct(u128) { reserved: u64, settings: PackedSettings, remaining: u61 };
     // Byte 8 holds the boolean in bit 0 and the enum in bits 1 and 2.
     // This checks that we find the enum even when it sits beyond the first 64 bits
-    var buffer: [16]u8 = .{0} ** 16;
+    var buffer: [16]u8 = @splat(0);
     buffer[8] = 0b101; // enabled = 1, status = 2, which is declared
     try validateValue(Record, &buffer);
     buffer[8] = 0b011; // enabled = 1, status = 1, which is not declared

@@ -32,27 +32,28 @@ pub fn ColumnOptions(comptime Row: type) type {
 /// Store each field of Row in a separate column.
 /// Slice fields use ragged storage, and fields listed in packed_fields use packed bits
 pub fn Columns(comptime Row: type, comptime options: ColumnOptions(Row)) type {
-    const row_fields = @typeInfo(Row).@"struct".fields;
-    if (row_fields.len == 0) {
+    const row_info = @typeInfo(Row).@"struct";
+    const field_count = row_info.field_names.len;
+    if (field_count == 0) {
         @compileError("stash: Columns row type must have at least one field\n" ++
             "  received '" ++ @typeName(Row) ++ "'");
     }
 
-    const columns: [row_fields.len]Column = blk: {
-        var is_packed = [_]bool{false} ** row_fields.len;
+    const columns: [field_count]Column = blk: {
+        var is_packed: [field_count]bool = @splat(false);
         for (options.packed_fields) |packed_column| {
-            if (is_packed[@intFromEnum(packed_column)]) {
+            if (is_packed[@backingInt(packed_column)]) {
                 @compileError("stash: Columns packed_fields must not contain duplicates\n" ++
                     "  field '" ++ @tagName(packed_column) ++ "' is listed more than once");
             }
-            is_packed[@intFromEnum(packed_column)] = true;
+            is_packed[@backingInt(packed_column)] = true;
         }
-        var result: [row_fields.len]Column = undefined;
-        for (row_fields, 0..) |field, i| {
+        var result: [field_count]Column = undefined;
+        for (row_info.field_names, row_info.field_types, 0..) |field_name, FieldType, i| {
             result[i] = .{
-                .name = field.name,
-                .type = field.type,
-                .kind = if (is_packed[i]) .packed_bits else if (isSlice(field.type)) .ragged_slice else .fixed,
+                .name = field_name,
+                .type = FieldType,
+                .kind = if (is_packed[i]) .packed_bits else if (isSlice(FieldType)) .ragged_slice else .fixed,
             };
         }
         break :blk result;
@@ -85,7 +86,7 @@ pub fn Columns(comptime Row: type, comptime options: ColumnOptions(Row)) type {
                 pub fn column(
                     self: @This(),
                     comptime field: Field,
-                ) fieldView(columns[@intFromEnum(field)], view_mode) {
+                ) fieldView(columns[@backingInt(field)], view_mode) {
                     return @field(self.columns, @tagName(field));
                 }
 
@@ -94,10 +95,10 @@ pub fn Columns(comptime Row: type, comptime options: ColumnOptions(Row)) type {
                     self: @This(),
                     comptime field: Field,
                     index: usize,
-                ) columns[@intFromEnum(field)].type {
+                ) columns[@backingInt(field)].type {
                     std.debug.assert(index < self.row_count);
                     const column_view = self.column(field);
-                    return switch (columns[@intFromEnum(field)].kind) {
+                    return switch (columns[@backingInt(field)].kind) {
                         .fixed => column_view[index],
                         .packed_bits, .ragged_slice => column_view.get(index),
                     };
@@ -109,8 +110,8 @@ pub fn Columns(comptime Row: type, comptime options: ColumnOptions(Row)) type {
                 pub fn get(self: @This(), index: usize) Row {
                     std.debug.assert(index < self.row_count);
                     var row: Row = undefined;
-                    inline for (row_fields) |field| {
-                        @field(row, field.name) = self.value(@field(Field, field.name), index);
+                    inline for (row_info.field_names) |field_name| {
+                        @field(row, field_name) = self.value(@field(Field, field_name), index);
                     }
                     return row;
                 }
@@ -351,7 +352,7 @@ fn validateColumns(comptime columns: []const Column) void {
             .ragged_slice => {
                 comptime_validation.assertSliceHasSupportedPointerAttributes(column.type);
                 const pointer_info = @typeInfo(column.type).pointer;
-                if (!pointer_info.is_const) {
+                if (!pointer_info.attrs.@"const") {
                     @compileError("stash: Columns slice fields must be []const T\n" ++
                         "  field '" ++ column.name ++ "' has type '" ++ @typeName(column.type) ++ "'");
                 }
@@ -394,7 +395,7 @@ fn dataStartOffset(column_count: usize) usize {
 fn columnViewsType(comptime columns: []const Column, comptime view_mode: ViewMode) type {
     var field_names: [columns.len][]const u8 = undefined;
     var field_types: [columns.len]type = undefined;
-    var field_attrs: [columns.len]std.builtin.Type.StructField.Attributes = undefined;
+    var field_attrs: [columns.len]std.lang.Type.Struct.FieldAttributes = undefined;
 
     for (columns, 0..) |column, index| {
         const FieldView = fieldView(column, view_mode);
@@ -622,7 +623,7 @@ test "Columns views reject a packed column that is too short for the declared ro
     var buffer: [@sizeOf(ColumnarHeader) + 2 * @sizeOf(FieldEntry) + @sizeOf(u32)]u8 align(Block.alignment) = undefined;
     @memset(&buffer, 0);
 
-    const directory_end = dataStartOffset(@typeInfo(Row).@"struct".fields.len);
+    const directory_end = dataStartOffset(@typeInfo(Row).@"struct".field_names.len);
     bytes.writeValue(ColumnarHeader, buffer[0..@sizeOf(ColumnarHeader)], .{
         .row_count = 1,
         .field_count = 2,
@@ -776,7 +777,7 @@ test "Columns encode() leaves an undersized or misaligned destination buffer unc
     const Row = struct { id: u32, name: []const u8 };
     const Block = Columns(Row, .{});
     const rows = [_]Row{.{ .id = 1, .name = "a" }};
-    var buffer: [128]u8 align(Block.alignment) = .{99} ** 128;
+    var buffer: [128]u8 align(Block.alignment) = @splat(99);
     const byte_count = try Block.encodedSize(&rows);
     try std.testing.expectError(
         error.NoSpaceLeft,

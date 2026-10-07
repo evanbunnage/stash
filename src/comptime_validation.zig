@@ -3,15 +3,15 @@ const builtin = @import("builtin");
 
 // We only support little-endian targets for now
 comptime {
-    const endianness = builtin.cpu.arch.endian();
+    const endianness = builtin.target.cpu.arch.endian();
     if (endianness != .little) {
         @compileError(std.fmt.comptimePrint(
             "stash: a little-endian target is required\n" ++
                 "  target '{s}-{s}-{s}' is {s}-endian",
             .{
-                @tagName(builtin.cpu.arch),
-                @tagName(builtin.os.tag),
-                @tagName(builtin.abi),
+                @tagName(builtin.target.cpu.arch),
+                @tagName(builtin.target.os.tag),
+                @tagName(builtin.target.abi),
                 @tagName(endianness),
             },
         ));
@@ -35,6 +35,7 @@ fn assertStorableType(comptime T: type, comptime type_path: []const u8) void {
         .float => {},
         .bool => return,
         .@"enum" => |enum_info| {
+            assertNotEmptyEnum(T, type_path);
             assertStorableType(enum_info.tag_type, type_path);
             return;
         },
@@ -56,14 +57,14 @@ fn assertStorableType(comptime T: type, comptime type_path: []const u8) void {
                     "  example: examples/03_stash_a_struct.zig"),
                 .@"extern" => {
                     assertStructHasNoImplicitPadding(T);
-                    for (struct_info.fields) |field| {
-                        assertStorableType(field.type, type_path ++ "." ++ field.name);
+                    for (struct_info.field_names, struct_info.field_types) |field_name, field_type| {
+                        assertStorableType(field_type, type_path ++ "." ++ field_name);
                     }
                     return;
                 },
                 .@"packed" => {
-                    for (struct_info.fields) |field| {
-                        assertStorablePackedField(field.type, type_path ++ "." ++ field.name);
+                    for (struct_info.field_names, struct_info.field_types) |field_name, field_type| {
+                        assertStorablePackedField(field_type, type_path ++ "." ++ field_name);
                     }
                 },
             }
@@ -109,14 +110,17 @@ pub fn assertStorablePackedField(comptime T: type, comptime type_path: []const u
     switch (@typeInfo(T)) {
         .int => assertFixedWidthInteger(T, type_path),
         .bool => {},
-        .@"enum" => |enum_info| assertStorablePackedField(enum_info.tag_type, type_path),
+        .@"enum" => |enum_info| {
+            assertNotEmptyEnum(T, type_path);
+            assertStorablePackedField(enum_info.tag_type, type_path);
+        },
         .@"struct" => |struct_info| {
             if (struct_info.layout != .@"packed") {
                 @compileError("stash: structs inside packed structs must also be packed\n" ++
                     "  '" ++ type_path ++ "' is not a packed struct");
             }
-            for (struct_info.fields) |field| {
-                assertStorablePackedField(field.type, type_path ++ "." ++ field.name);
+            for (struct_info.field_names, struct_info.field_types) |field_name, field_type| {
+                assertStorablePackedField(field_type, type_path ++ "." ++ field_name);
             }
         },
         .@"union" => @compileError("stash: unions are not supported\n" ++
@@ -137,6 +141,21 @@ fn assertFixedWidthInteger(comptime T: type, comptime type_path: []const u8) voi
     }
 }
 
+// Zig backs an enum with no tags by noreturn, so no value of it can exist.
+// Check before @alignOf, which fails with a compiler error for such types
+fn assertNotEmptyEnum(comptime T: type, comptime type_path: []const u8) void {
+    switch (@typeInfo(T)) {
+        .array => |array_info| assertNotEmptyEnum(array_info.child, type_path),
+        .@"enum" => |enum_info| if (enum_info.tag_type == noreturn) {
+            @compileError("stash: empty enums are not supported\n" ++
+                "  '" ++ @typeName(T) ++ "' has no tags, so no value of it can exist\n" ++
+                (if (std.mem.eql(u8, type_path, @typeName(T))) "" else "  it is used by '" ++ type_path ++ "'\n") ++
+                "  fix: declare the tags the field can hold, or remove the field");
+        },
+        else => {},
+    }
+}
+
 // Unused storage bits would be copied with the value and make its bytes nondeterministic
 fn assertNoUnusedStorageBits(comptime T: type, comptime type_path: []const u8) void {
     if (@bitSizeOf(T) != 8 * @sizeOf(T)) {
@@ -153,19 +172,20 @@ fn assertNoUnusedStorageBits(comptime T: type, comptime type_path: []const u8) v
 // Implicit compiler-inserted bytes are rejected. If you need a certain size struct, add explicit
 // fields (like _reserved) with the minimum number of bytes to avoid added padding.
 fn assertStructHasNoImplicitPadding(comptime T: type) void {
+    const struct_info = @typeInfo(T).@"struct";
     var end: usize = 0;
-    for (@typeInfo(T).@"struct".fields) |field| {
-        const offset = @offsetOf(T, field.name);
+    for (struct_info.field_names, struct_info.field_types) |field_name, field_type| {
+        const offset = @offsetOf(T, field_name);
         if (offset != end) {
             @compileError(std.fmt.comptimePrint(
                 "stash: implicit field padding is not supported\n" ++
                     "  '{s}' has {d} bytes of implicit padding before field '{s}'\n" ++
                     "  fix: insert an explicit [{d}]u8 reserved field before '{s}'\n" ++
                     "  example: examples/03_stash_a_struct.zig",
-                .{ @typeName(T), offset - end, field.name, offset - end, field.name },
+                .{ @typeName(T), offset - end, field_name, offset - end, field_name },
             ));
         }
-        end = offset + @sizeOf(field.type);
+        end = offset + @sizeOf(field_type);
     }
     if (end != @sizeOf(T)) {
         @compileError(std.fmt.comptimePrint(
@@ -186,12 +206,14 @@ pub fn assertStructHasSupportedSchemaFields(comptime Schema: type, comptime owne
         "  received '" ++ @typeName(Schema) ++ "'");
     if (info.@"struct".is_tuple) @compileError("stash: " ++ owner ++ " expects named fields, not a tuple\n" ++
         "  received '" ++ @typeName(Schema) ++ "'");
-    for (info.@"struct".fields) |field| {
-        if (field.is_comptime) @compileError("stash: " ++ owner ++ " fields must not be comptime\n" ++
-            "  field '" ++ field.name ++ "' is comptime");
-        if ((field.alignment orelse @alignOf(field.type)) != @alignOf(field.type)) {
+    const struct_info = info.@"struct";
+    for (struct_info.field_names, struct_info.field_types, struct_info.field_attrs) |field_name, field_type, field_attrs| {
+        if (field_attrs.@"comptime") @compileError("stash: " ++ owner ++ " fields must not be comptime\n" ++
+            "  field '" ++ field_name ++ "' is comptime");
+        assertNotEmptyEnum(field_type, field_name);
+        if ((field_attrs.@"align" orelse @alignOf(field_type)) != @alignOf(field_type)) {
             @compileError("stash: " ++ owner ++ " fields must use natural alignment\n" ++
-                "  field '" ++ field.name ++ "' has custom alignment\n" ++
+                "  field '" ++ field_name ++ "' has custom alignment\n" ++
                 "  fix: put alignment on an explicitly stored extern struct instead");
         }
     }
@@ -204,16 +226,17 @@ pub fn assertSliceHasSupportedPointerAttributes(comptime T: type) void {
         "  received '" ++ @typeName(T) ++ "'\n" ++
         "  fix: use []const T and store any terminator explicitly\n" ++
         "  example: examples/16_stash_null_terminated_strings.zig");
-    if (pointer.is_volatile) @compileError("stash: volatile slices are not supported\n" ++
+    if (pointer.attrs.@"volatile") @compileError("stash: volatile slices are not supported\n" ++
         "  received '" ++ @typeName(T) ++ "'\n" ++
         "  fix: use []const T");
-    if (pointer.is_allowzero) @compileError("stash: allowzero slices are not supported\n" ++
+    if (pointer.attrs.@"allowzero") @compileError("stash: allowzero slices are not supported\n" ++
         "  received '" ++ @typeName(T) ++ "'\n" ++
         "  fix: use []const T");
-    if (pointer.address_space != .generic) @compileError("stash: slices must use the generic address space\n" ++
+    if ((pointer.attrs.@"addrspace" orelse .generic) != .generic) @compileError("stash: slices must use the generic address space\n" ++
         "  received '" ++ @typeName(T) ++ "'\n" ++
         "  fix: use []const T");
-    if ((pointer.alignment orelse @alignOf(pointer.child)) != @alignOf(pointer.child)) {
+    assertNotEmptyEnum(pointer.child, @typeName(T));
+    if ((pointer.attrs.@"align" orelse @alignOf(pointer.child)) != @alignOf(pointer.child)) {
         @compileError("stash: slices must use natural alignment\n" ++
             "  received '" ++ @typeName(T) ++ "'\n" ++
             "  fix: use []const T");

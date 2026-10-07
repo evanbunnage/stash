@@ -342,7 +342,7 @@ test "RaggedSliceBlock view() rejects offsets that do not describe all stored el
 
 test "RaggedSliceBlock views reject an incomplete count, offset table, or element" {
     const Block = RaggedSliceBlock(u16);
-    var buffer: [15]u8 align(Block.alignment) = .{0} ** 15;
+    var buffer: [15]u8 align(Block.alignment) = @splat(0);
     const written = try Block.encode(&buffer, &.{&.{42}});
     // One child needs a four-byte count and two four-byte offsets
     for (0..12) |length| {
@@ -361,7 +361,7 @@ test "RaggedSliceBlock encode() leaves an undersized or misaligned destination u
     inline for (.{ u8, u64 }) |T| {
         const Block = RaggedSliceBlock(T);
         const children = [_][]const T{&.{1}};
-        var buffer: [32]u8 align(Block.alignment) = .{99} ** 32;
+        var buffer: [32]u8 align(Block.alignment) = @splat(99);
         const byte_count = try Block.encodedSize(&children);
         try std.testing.expectError(
             error.NoSpaceLeft,

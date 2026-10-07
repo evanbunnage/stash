@@ -2,7 +2,7 @@
     .name = .stash_examples,
     .fingerprint = 0x98e655d131e4eaa1,
     .version = "0.0.0",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .stash = .{ .path = ".." },
     },

@@ -73,7 +73,7 @@ const view = try MyFormat.view(byte_buffer);
 
 ## Getting started
 
-Requires Zig 0.16.0.
+Requires Zig 0.17.0.
 
 ```sh
 zig fetch --save=stash git+https://github.com/evanbunnage/stash#v0.2.0
@@ -130,7 +130,7 @@ be up here:
 
 ## Is stash just a glorified `@ptrCast()`?
 
-Kinda. [`@ptrCast()`](https://ziglang.org/documentation/0.16.0/#ptrCast), if you aren't familiar, tells the compiler to "interpret the bytes at address
+Kinda. [`@ptrCast()`](https://ziglang.org/documentation/0.17.0/#ptrCast), if you aren't familiar, tells the compiler to "interpret the bytes at address
 0xX as my type `T`". This is of course very fast, and "hella zero copy"[^1]. But `@ptrCast()` does
 not guarantee that the bytes in the buffer actually form a valid `T`.
 
